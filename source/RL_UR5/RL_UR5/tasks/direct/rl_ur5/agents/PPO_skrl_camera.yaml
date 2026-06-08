@@ -58,15 +58,15 @@ models:
           - linear: 512
         activations: [relu, relu, relu, null, tanh]
         
-      # MLP encoder for state input  
+      # MLP encoder for state input
       - name: proprioception
         input: OBSERVATIONS["state"]  # This will receive the 'state' key from observation dict
-        layers: [256,128, 64]
-        activations: [ relu, relu, relu]
+        layers: [256, 128, 64]
+        activations: [relu, relu, relu]
 
-      # Fusion layer
+      # Fusion layer combining CNN and MLP outputs
       - name: net
-        input: concatenate([camera_features, proprioception]) 
+        input: concatenate([camera_features, proprioception])  # Combine features
         layers: [128, 64]
         activations: [relu, relu]
 
@@ -107,7 +107,7 @@ agent:
   grad_norm_clip: 1.0
   ratio_clip: 0.2
   value_clip: 0.2
-  entropy_loss_scale: 0.01 # Higher for exploration with visual input
+  entropy_loss_scale: 0.001 # Higher for exploration with visual input
   clip_predicted_values: True
   value_loss_scale: 1.0
   kl_threshold: 0.01
