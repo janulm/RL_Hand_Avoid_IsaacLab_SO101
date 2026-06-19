@@ -1,507 +1,163 @@
-# Obstacle Avoidance with Vision-Based RL for Manipulators in Isaac Lab
+# RL Hand-Avoid — SO-ARM101 (Isaac Lab)
 
-<div align="center">
-  <img src="gifs/i2r_clemson_ur5.png" width="100%">
-  <br><br>
-  <img src="gifs/i2r_clemson_ur5.gif" width="80%" autoplay loop>
-</div>
+Vision-based **human-hand avoidance** reinforcement learning for the
+[SO-ARM101](https://github.com/TheRobotStudio/SO-ARM100) low-cost arm, trained
+in **Isaac Lab 2.3 / Isaac Sim 5.x** and intended for sim-to-real deployment on
+a real SO-101 follower via [LeRobot](https://github.com/huggingface/lerobot).
 
+The arm reaches a target while a moving "hand" obstacle sweeps through its
+workspace; the policy must steer clear. The policy sees a camera image (RGB +
+a hand-segmentation channel) plus proprioception, and outputs joint targets.
 
-This project implements vision-based reinforcement learning for the UR5 robotic manipulator in Isaac Lab, enabling precise object manipulation through camera-guided control. Our framework combines state-of-the-art physics simulation with deep reinforcement learning to achieve robust reach-avoid operations in complex environments.
-
-**Key Features:**
-- 🎯 **Vision-Based Control**: Direct camera input for object detection and manipulation
-- 🚀 **GPU-Accelerated Training**: Leverage Isaac Sim's parallel simulation capabilities
-- 📊 **Real-time Monitoring**: Integrated WandB support for experiment tracking
-- 🔧 **Modular Architecture**: Easy to extend and customize for different tasks
-
-**Keywords:** UR5, vision-based RL, Isaac Lab, robotic manipulation, pick-and-place
+> Built for the HUD / RSI **RL Environments** hackathon. The scored substance is
+> the *environment + verification + a measured improvement*; the real arm
+> dodging a hand is the wow factor.
 
 ---
 
-## 📋 Table of Contents
-- [Installation](#installation)
-- [Training](#training)
-- [Hierarchical Waypoint RL](#hierarchical-waypoint-rl)
-- [Evaluation](#evaluation)
-- [Configuration](#configuration)
-- [Results](#results)
-- [Troubleshooting](#troubleshooting)
+## Why the Direct workflow (not manager-based)
+
+Isaac Lab's **manager-based** workflow only supports a flat `Box` observation
+and cannot expose composite image+state observations to the policy — in
+practice the camera term is silently ignored (confirmed by the Isaac Lab
+maintainers in
+[#2613](https://github.com/isaac-sim/IsaacLab/issues/2613) and
+[#2743](https://github.com/isaac-sim/IsaacLab/discussions/2743)). Vision RL must
+therefore use the **Direct** workflow with a `gym.spaces.Dict` observation,
+which is what this repo does.
 
 ---
 
-## 🚀 Installation
+## Hardware (deploy target)
 
-### Prerequisites
-- Ubuntu 22.04 or Windows
-- NVIDIA GPU with CUDA 11.7+
-- Python 3.11
-
-### Source installation: Isaac Sim 5.1.0 and Isaac Lab 2.3.0
-
-This repository was developed and tested with Isaac Sim 5.1.0 and Isaac Lab 2.3.0. The instructions below follow the Isaac Lab source-installation workflow.
-
-> [!IMPORTANT]
-> **Directory Structure is Critical!**
-> You must install Isaac Sim, Isaac Lab, and this repository in **three separate directories**. Do not clone one inside another.
->
-> **Recommended Structure:**
-> ```text
-> ~/workspaces/
-> ├── IsaacSim/           # Installation 1
-> ├── IsaacLab/           # Installation 2
-> └── RL_UR5_IsaacLab/    # This Repository (Installation 3)
-> ```
-
-**1) Clone and build Isaac Sim (5.1.0)**
-
-```bash
-# Example workspace directory where you keep the sources
-cd $HOME
-
-# Clone Isaac Sim
-git clone https://github.com/isaac-sim/IsaacSim.git
-cd IsaacSim
-
-
-# Build Isaac Sim from source (Linux)
-./build.sh
-
-# After a successful build, set the ISAACSIM_PATH environment variable to the built release
-export ISAACSIM_PATH="${PWD}/IsaacSim"
-export ISAACSIM_PYTHON_EXE="${ISAACSIM_PATH}/python.sh"
-
-# Quick verification
-${ISAACSIM_PYTHON_EXE} -c "print('Isaac Sim configuration is now complete.')"
-${ISAACSIM_PATH}/isaac-sim.sh --help
-```
-
-**2) Clone Isaac Lab (2.3.0) and link to Isaac Sim**
-
-```bash
-# Move to your workspace (outside of IsaacSim) and clone Isaac Lab
-cd $HOME
-git clone https://github.com/isaac-sim/IsaacLab.git
-cd IsaacLab
-
-
-# Create a symbolic link in Isaac Lab pointing to the Isaac Sim built release
-# This makes the Isaac Sim modules and extensions discoverable by Isaac Lab
-ln -s ${ISAACSIM_PATH} _isaac_sim
-```
-
-**3) Create / activate a Python environment for Isaac Lab**
-
-Recommendation: create a dedicated environment (conda or uv). For Isaac Sim 5.x the Python runtime is 3.11 — ensure your virtual env uses the same Python minor version.
-
-```bash
-# Using the helper to create a conda environment (default name: env_isaaclab)
-./isaaclab.sh -c
-
-
-# Activate the environment (conda example)
-conda activate env_isaaclab
-
-```
-
-**4) Install Isaac Lab extensions and learning frameworks**
-
-```bash
-# Install all extensions (default). This installs the learning frameworks (rl_games, rsl_rl, sb3, skrl, robomimic, ...)
-./isaaclab.sh -i
-
-```
-
-**5) Clone and Install this Repository**
-
-Now that the base environment is set up, clone this repository in a **separate folder** (do not nest it inside IsaacLab or IsaacSim).
-
-```bash
-cd $HOME
-# Clone this repository (replace URL with actual repository URL)
-git clone https://github.com/yourusername/RL_UR5_IsaacLab.git
-cd RL_UR5_IsaacLab
-
-# Install the project in editable mode
-pip install -e source/RL_UR5
-```
-
-**6) Download the 3D assets**
-
-Download the 3D assets from: https://clemson.box.com/s/raeoeb7gcislpjend57gj5im4q5p24h2
-
-Place the downloaded assets in the following folder (replace the existing assets in that folder):
-
-`/RL_UR5_IsaacLab/source/RL_UR5/RL_UR5/tasks/direct/rl_ur5/assets`
-
-
-
-Note: the assets must be downloaded and placed into the assets folder above before running the tasks or training — tasks expect these assets to be present.
-
-**7) Weights & Biases (WandB) integration (optional but recommended)**
-
-WandB is used for experiment tracking and visualizing training metrics. To enable WandB integration for this project:
-
-- Install the WandB client in the active Conda environment:
-
-```bash
-pip install wandb
-```
-
-- Login to WandB (interactive) or provide an API key via environment variable:
-
-```bash
-# interactive login (recommended for local use)
-wandb login
-
-# or set the API key in CI/headless setups
-export WANDB_API_KEY="<your_api_key_here>"
-```
-
-- Enable WandB in the project configuration at:
-
-`source/RL_UR5/RL_UR5/tasks/direct/rl_ur5/agents/PPO_skrl_hierarchical_gray_depth.yaml`
-
-Set `agent.experiment.wandb: true` and set `agent.experiment.wandb_kwargs.project` / `agent.experiment.wandb_kwargs.entity` to your project and account.
-
-Note: ensure you have network access and a WandB account (or set `WANDB_API_KEY`) before running training with WandB enabled. If you prefer not to use WandB, set `agent.experiment.wandb` to `false`.
-
-
-
-
-Notes and troubleshooting:
-- Ensure OS is Ubuntu 22.04 LTS (required for building Isaac Sim from source).
-- Isaac Sim 5.x requires Python 3.11 — the Python interpreter in your virtual environment must match the simulator's Python version.
-- If you see `ModuleNotFoundError: No module named 'isaacsim'`, ensure the virtual environment is activated and `_isaac_sim/setup_conda_env.sh` (or the corresponding setup script) has been executed.
-- If switching from older Isaac Sim versions, you may want to reset user data after the first run:
-
-```bash
-${ISAACSIM_PATH}/isaac-sim.sh --reset-user
-```
-
-If you prefer not to build from source, you can use pre-built packages for Isaac Sim (not covered here) or follow the Isaac Lab pip/binaries installation guides linked in the official docs.
+- SO-101 leader + follower arms (LeRobot teleop / motor bus).
+- RGB cameras only: a wrist camera and an overhead camera (no depth).
+- Tested GPU: RTX 5090 Laptop (Blackwell), Ubuntu 24.04.
 
 ---
 
-## 🎯 Training
+## Repository layout
 
-### Quick Start
-
-Train the UR5 manipulator with vision-based reinforcement learning (High-Level Policy):
-
-```bash
-python scripts/skrl/train.py \
-    --task=UR5-Hierarchical-Depth-PPO \
-    --num_envs 32 \
-    --enable_cameras \
-    --headless
+```
+docker/                     # Dockerized Isaac Lab (build.sh, run.sh, Dockerfile)
+scripts/
+  skrl/train.py, play.py    # skrl PPO training / playback
+  list_envs.py              # list registered SO-ARM101 tasks
+  smoke_test.py             # quick env sanity check (reset + step)
+  debug_camera.py           # dump RGB|mask|overlay frames of the policy input
+  create_charuco.py         # make a ChArUco board (camera calibration)
+  align_cameras.py          # align/calibrate real cameras (deploy)
+source/so_arm101_avoid/     # the Isaac Lab extension (our env lives here)
+  so_arm101_avoid/
+    robots/trs_so101/       # vendored SO-101 URDF + ArticulationCfg
+    tasks/reach_avoid/      # Direct ReachAvoid env + cfg + skrl agent yaml
 ```
 
-### Command Arguments
+Registered tasks:
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--task` | Training environment/task name | Required |
-| `--num_envs` | Number of parallel simulation environments | 2 |
-| `--enable_cameras` | Enable camera sensors for vision-based control | False |
-| `--headless` | Run without GUI rendering (faster training) | False |
-| `--seed` | Random seed for reproducibility | 42 |
-| `--max_iterations` | PPO update iterations; overrides the YAML trainer timesteps | Config value |
-
-### Advanced Training Example
-
-For longer training with more environments:
-
-```bash
-python scripts/skrl/train.py \
-    --task=UR5-Hierarchical-Depth-PPO \
-    --num_envs 64 \
-    --enable_cameras \
-    --headless \
-    --seed 123 \
-    --max_iterations 50000
-```
-
-### Monitoring Training Progress
-
-Training logs and checkpoints are automatically saved to:
-```
-logs/skrl/logs/<experiment_name>/<timestamp>/
-├── checkpoints/
-│   ├── best_agent.pt      # Best performing model
-│   └── agent_XXXX.pt      # Periodic checkpoints
-├── events.out.tfevents.*  # TensorBoard event file
-└── params/
-    ├── agent.yaml
-    └── env.yaml
-```
+- `Isaac-SO-ARM101-ReachAvoid-Direct-v0` — training.
+- `Isaac-SO-ARM101-ReachAvoid-Direct-Play-v0` — few-env playback/eval.
 
 ---
 
-### How It Works
+## Quick start (Docker)
 
-The hierarchical setup splits the problem into:
-
-- `UR5-Waypoint-LowLevel-PPO`: a state-only low-level waypoint tracker with 6-D joint-delta actions.
-- `UR5-Hierarchical-Depth-PPO`: a high-level gray+depth visual policy with 3-D Cartesian waypoint actions. The waypoint is executed by a damped differential IK controller inside the environment.
-
-The high-level environment does not require a trained low-level checkpoint to run. It uses DLS IK for the low-level executor, while the separate low-level PPO task gives you a learned tracker path to experiment with later.
-
-The human arm pose is not provided in the policy state; obstacle awareness must come from the gray+depth image.
-
-For a deeper explanation of how the high-level policy chooses and learns waypoints, see [HIERARCHICAL_WAYPOINT_RL.md](HIERARCHICAL_WAYPOINT_RL.md).
-
-For a quick smoke test of the high-level policy:
+Everything runs inside a container built on NVIDIA's official
+`nvcr.io/nvidia/isaac-lab:2.3.2` image (Blackwell-ready). The image is large
+(~20 GB) on first build.
 
 ```bash
-python scripts/skrl/train.py \
-    --task=UR5-Hierarchical-Depth-PPO \
-    --num_envs 2 \
-    --enable_cameras \
-    --headless \
-    --max_iterations 1
+# 1. Build the image
+./docker/build.sh
+
+# 2. Run a command in the container (GUI + USB passthrough handled for you)
+./docker/run.sh <command>
 ```
 
-### Train the Low-Level Waypoint Tracker
+`docker/run.sh` mounts the repo, forwards the X11 display (`xhost`, `DISPLAY`,
+`.Xauthority`), passes through `/dev` (motor bus + cameras), and keeps Isaac Sim
+shader/asset caches under `~/docker/isaac-sim/` so the 2nd+ launch is fast.
+
+### Common commands
 
 ```bash
-python scripts/skrl/train.py \
-    --task=UR5-Waypoint-LowLevel-PPO \
-    --num_envs 64 \
-    --headless
+# List our registered tasks
+./docker/run.sh python scripts/list_envs.py --headless
+
+# Sanity-check the env (reset + random steps, prints obs shapes & reward)
+./docker/run.sh python scripts/smoke_test.py --headless
+
+# Visualize EXACTLY what the policy sees: RGB | hand-mask | overlay (+ a gif)
+./docker/run.sh python scripts/debug_camera.py --headless --steps 60
+#   -> verification_output/camera_debug/
+
+# Train (headless). --enable_cameras is required for the image observation.
+./docker/run.sh python scripts/skrl/train.py \
+    --task Isaac-SO-ARM101-ReachAvoid-Direct-v0 --headless --enable_cameras
+
+# Watch a trained policy in the GUI
+./docker/run.sh python scripts/skrl/play.py \
+    --task Isaac-SO-ARM101-ReachAvoid-Direct-Play-v0 --enable_cameras
 ```
 
-For a quick smoke test:
-
-```bash
-python scripts/skrl/train.py \
-    --task=UR5-Waypoint-LowLevel-PPO \
-    --num_envs 2 \
-    --headless \
-    --max_iterations 1
-```
-
-
-
-### Relevant Files
-
-- Environment: `source/RL_UR5/RL_UR5/tasks/direct/rl_ur5/huber_obj_hierarchical_gray_depth.py`
-- Low-level PPO config: `source/RL_UR5/RL_UR5/tasks/direct/rl_ur5/agents/PPO_skrl_waypoint_low_level.yaml`
-- High-level PPO config: `source/RL_UR5/RL_UR5/tasks/direct/rl_ur5/agents/PPO_skrl_hierarchical_gray_depth.yaml`
-
-### Runtime Environment
-
-If `python scripts/skrl/train.py ...` fails with `ModuleNotFoundError: No module named 'isaacsim'`, activate the Isaac Lab environment and source the Isaac Sim setup script first:
-
-```bash
-conda activate env_isaaclab
-source /path/to/isaacsim/setup_conda_env.sh
-```
-
-On this workstation, the verified setup was:
-
-```bash
-conda activate isaac
-source /home/adi2440/isaacsim/setup_conda_env.sh
-```
+> Tip: `--max_iterations N` and `--num_envs N` are handy for short runs.
 
 ---
 
-## 🎮 Evaluation
+## Observation / action contract
 
-### Playing the Default Trained Model
+Keep sim, eval, and deploy in agreement on these.
 
-To visualize and evaluate the default trained hierarchical checkpoint, you can run inference with the following command:
+**Observation** (`gym.spaces.Dict`):
 
-```bash
-python scripts/skrl/play.py \
-    --task=UR5-Hierarchical-Depth-PPO \
-    --num_envs 2 \
-    --enable_cameras \
-    --checkpoint logs/skrl/logs/skrl_hierarchical_depth/v1/checkpoints/best_agent.pt
-```
+| Key | Shape | Contents |
+|-----|-------|----------|
+| `camera` | `(H, W, C)` | per active camera: RGB (3) and/or hand mask (1). Default 4ch = RGB + mask. |
+| `proprio` | `(20,)` | `joint_pos_rel` (6) + `joint_vel` (6) + `target_pos` (3) + `last_action` (5) |
 
-### Evaluation Arguments
+**Action**: 5 arm joint-position targets (gripper unused), applied as
+`target = default_joint_pos + action_scale * action`.
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--checkpoint` | Path to trained model checkpoint | Required |
-| `--num_envs` | Number of parallel evaluation environments | 2 |
-| `--enable_cameras` | Enable camera rendering | False |
-| `--video` | Record evaluation episodes | False |
-| `--video_length` | Number of steps to record | 200 |
-
-### Batch Evaluation
-
-Evaluate multiple checkpoints or conditions:
-
-```bash
-# Evaluate with different environment counts
-for n in 1 2 4 8; do
-    python scripts/skrl/play.py \
-        --task=UR5-Hierarchical-Depth-PPO \
-        --num_envs $n \
-        --enable_cameras \
-        --checkpoint logs/skrl/logs/skrl_hierarchical_depth/v1/checkpoints/best_agent.pt
-done
-```
+The hand mask is produced in sim by analytically projecting the hand sphere into
+the camera (intrinsics + extrinsics) — the same binary hand/not-hand blob we get
+from MediaPipe at deploy time.
 
 ---
 
-## ⚙️ Configuration
+## Configurable knobs (`SoArm101ReachAvoidEnvCfg`)
 
-### WandB Integration
+| Field | Default | Options / notes |
+|-------|---------|-----------------|
+| `camera_view` | `"overhead"` | `"overhead"`, `"wrist"`, `"both"` |
+| `obs_mode` | `"rgb+mask"` | `"rgb+mask"`, `"rgb"`, `"mask"` |
+| `domain_randomization` | `True` | **stub** — not yet implemented |
+| `image_height/width` | `100` | policy image resolution |
+| reward weights | — | `w_track`, `w_clearance`, `clearance_std`, `collision_distance`, ... |
 
-This project includes Weights & Biases (WandB) integration for experiment tracking. Configuration is located at:
-
-```
-source/RL_UR5/RL_UR5/tasks/direct/rl_ur5/agents/PPO_skrl_hierarchical_gray_depth.yaml
-```
-
-To enable WandB logging, modify the configuration:
-
-```yaml
-# In PPO_skrl_hierarchical_gray_depth.yaml
-agent:
-  experiment:
-    wandb: true
-    wandb_kwargs:
-      project: "ur5-manipulation"
-      entity: "your-wandb-username"
-```
-
-### Environment Configuration
-
-Customize task parameters in the environment configuration files:
-
-```yaml
-# Example configuration structure
-sim:
-  dt: 0.01                    # Simulation timestep
-  substeps: 1                  # Physics substeps
-  
-env:
-  num_envs: 2048              # Number of parallel environments
-  episode_length_s: 10.0      # Episode duration in seconds
-  
-robot:
-  controller:
-    type: "joint_position"    # Controller type
-    stiffness: 800.0
-    damping: 40.0
-```
+These flags are the levers for the planned ablations (modality, DR, reward
+shaping).
 
 ---
 
-## 📊 Results
+## Status / roadmap
 
-Our trained models achieve:
-- **Success Rate**: 90%+ on arm avoidance tasks
-- **Training Time**: ~10 hours on RTX 3080 (128 environments with Tiled Camera Data)
-- **Sim-to-Real Gap**: Minimal with proper domain randomization
-
-### Visualizations
-
-Training progress and evaluation videos are automatically saved to the logs directory. View them with:
-
-```bash
-# TensorBoard visualization
-tensorboard --logdir logs/skrl/logs/
-
-# Video playback
-python scripts/visualize_results.py --log_dir logs/skrl/logs/<experiment_name>
-```
+- [x] Dockerized Isaac Lab (shareable, GUI + USB passthrough).
+- [x] Direct-workflow `ReachAvoid` env (SO-101 + camera + moving hand).
+- [x] RGB + hand-mask Dict observation (verified aligned via `debug_camera.py`).
+- [x] skrl PPO (CNN + MLP) pipeline validated (camera is actually used).
+- [ ] Domain randomization + reward tuning.
+- [ ] Eval harness (success %, collision %, min-clearance) + plots.
+- [ ] LeRobot deploy bridge (camera + joints → policy → joint targets, safety clamp).
+- [ ] Real-robot avoidance video. ArUco-glove perception as a fallback.
 
 ---
 
-## 🔧 Troubleshooting
+## Credits
 
-### Common Issues
-
-**1. CUDA Out of Memory**
-```bash
-# Reduce number of environments
-python scripts/skrl/train.py --task=UR5-Hierarchical-Depth-PPO --num_envs 1 --enable_cameras
-```
-
-**2. Camera not rendering**
-- Ensure `--enable_cameras` flag is set
-- Check GPU drivers support RTX rendering
-- Try running without `--headless` for debugging
-
-**3. Module not found errors**
-```bash
-# Ensure conda environment is activated
-conda activate env_isaaclab
-source /path/to/isaacsim/setup_conda_env.sh
-
-# Reinstall project dependencies
-pip install -e source/RL_UR5 --force-reinstall
-```
-
-### Getting Help
-
-- 📚 Check the [Isaac Lab documentation](https://isaac-sim.github.io/IsaacLab)
-- 💬 Open an issue on our GitHub repository
-
----
-
-## 🚧 Coming Soon: Real Robot Deployment
-
-We're actively working on deploying our trained policies to physical UR5 robots! The upcoming release will include:
-
-### **Planned Features**
-
-- **🤖 Real UR5 Integration**: Direct deployment pipeline from simulation to physical UR5 arm
-- **📦 Pre-trained Checkpoints**: Battle-tested models ready for real-world deployment
-- **🔌 ROS2 Bridge**: Seamless integration with ROS2 for robot control and sensor data
-- **📷 Camera Calibration**: Automated tools for camera-robot calibration
-- **🛡️ Safety Layers**: Built-in collision detection and emergency stop mechanisms
-- **📊 Real-time Monitoring**: Live visualization of robot state and vision input
-
-
-## 📝 Citation
-
-If you use this work in your research, please cite:
-
-```bibtex
-@software{ur5_isaac_manipulation,
-  author = {Aditya Parameshwaran},
-  title = {Vision-Based UR5 Manipulation in Isaac Lab},
-  year = {2024},
-  publisher = {GitHub},
-  url = {https://github.com/yourusername/ur5-isaac-lab}
-}
-```
-
----
-
-## 📄 License
-
-Copyright (c) 2024, [Your Name/Organization]. All rights reserved.
-
-This project is released under the [BSD-3-Clause License](LICENSE). See the [LICENSE](LICENSE) file for full details.
-
-### Third-Party Licenses
-
-This project incorporates code from:
-- **Isaac Lab**: BSD-3-Clause License
-- **NVIDIA Isaac Sim**: Subject to NVIDIA EULA
-- **Python Dependencies**: Various licenses (see `requirements.txt`)
-
-For a complete list of third-party licenses, please refer to the `docs/licenses/` directory.
-
----
-
-## 🙏 Acknowledgments
-
-This work builds upon:
-- [NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab) for the simulation framework
-- [SKRL](https://github.com/Toni-SM/skrl) for reinforcement learning algorithms
-- The robotics research community for continuous inspiration
-
----
-
-<div align="center">
-  <b>Happy Training! 🚀</b>
-</div>
+- **SO-101 URDF + `ArticulationCfg`**: vendored from
+  [isaac_so_arm101](https://github.com/MuammerBay/isaac_so_arm101) (BSD-3-Clause).
+- **Base image / sim**: NVIDIA Isaac Lab + the
+  [Sim-to-Real SO-101 workshop](https://github.com/isaac-sim/Sim-to-Real-SO-101-Workshop)
+  Docker patterns.
+- **Reach-avoid design reference**: the vision-RL UR5 obstacle-avoidance repo
+  [aparame/RL_UR5_IsaacLab](https://github.com/aparame/RL_UR5_IsaacLab).

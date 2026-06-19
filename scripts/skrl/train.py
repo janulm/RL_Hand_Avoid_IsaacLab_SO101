@@ -145,7 +145,7 @@ from isaaclab.utils.io import dump_yaml
 
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 
-import RL_UR5  # noqa: F401
+import so_arm101_avoid  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # import logger

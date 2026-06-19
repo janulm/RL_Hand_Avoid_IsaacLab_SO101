@@ -105,7 +105,12 @@ elif args_cli.ml_framework.startswith("jax"):
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+try:
+    from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+except ModuleNotFoundError:
+    # Not available in all Isaac Lab versions; only needed for --use_pretrained_checkpoint.
+    def get_published_pretrained_checkpoint(*args, **kwargs):  # type: ignore
+        raise RuntimeError("pretrained_checkpoint support is unavailable in this Isaac Lab build")
 
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 
@@ -116,7 +121,7 @@ from isaaclab_tasks.utils import (
     parse_env_cfg,
 )
 
-import RL_UR5.tasks  # noqa: F401
+import so_arm101_avoid.tasks  # noqa: F401
 
 # config shortcuts
 algorithm = args_cli.algorithm.lower()
@@ -158,9 +163,6 @@ def main():
             return
     elif args_cli.checkpoint:
         resume_path = os.path.abspath(args_cli.checkpoint)
-    elif args_cli.task == "UR5-Hierarchical-Depth-PPO":
-        resume_path = os.path.abspath("logs/skrl/logs/skrl_hierarchical_depth/v1/checkpoints/best_agent.pt")
-        print(f"[INFO] Using default hierarchical checkpoint: {resume_path}")
     else:
         resume_path = get_checkpoint_path(
             log_root_path,

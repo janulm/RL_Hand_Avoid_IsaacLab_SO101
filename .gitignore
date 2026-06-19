@@ -33,6 +33,8 @@ docker/.container.cfg
 **/output/*
 **/agan_dataset/*
 **/outputs/*
+logs/
+**/verification_output/camera_debug/*
 **/videos/*
 **/wandb/*
 **/rgbd_dataset_1/*

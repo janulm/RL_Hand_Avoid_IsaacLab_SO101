@@ -1,0 +1,24 @@
+[package]
+
+# Semantic Versioning is used: https://semver.org/
+version = "0.1.0"
+
+# Description
+category = "isaaclab"
+readme = "README.md"
+
+title = "SO-ARM101 Reach-Avoid"
+author = "RL_Hand_Avoid"
+maintainer = "RL_Hand_Avoid"
+description = "Vision-based human-hand avoidance RL environment for the SO-ARM101 (Direct workflow)."
+repository = "https://github.com/janulm/RL_Hand_Avoid_IsaacLab_SO101"
+keywords = ["extension", "isaaclab", "so-arm101", "reach-avoid", "vision-rl"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_rl" = {}
+"isaaclab_tasks" = {}
+
+[[python.module]]
+name = "so_arm101_avoid"

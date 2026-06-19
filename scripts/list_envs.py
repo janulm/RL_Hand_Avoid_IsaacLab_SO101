@@ -9,8 +9,7 @@ Script to print all the available environments in Isaac Lab.
 The script iterates over all registered environments and stores the details in a table.
 It prints the name of the environment, the entry point and the config file.
 
-All the environments are registered in the `RL_UR5` extension. They start
-with `Isaac` in their name.
+All the environments are registered in the `so_arm101_avoid` extension.
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -27,30 +26,24 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 from prettytable import PrettyTable
 
-import RL_UR5.tasks # noqa: F401
+import so_arm101_avoid.tasks  # noqa: F401
 
 
 def main():
-    """Print all environments registered in `RL_UR5` extension."""
-    # print all the available environments
+    """Print all environments registered by the `so_arm101_avoid` extension."""
     table = PrettyTable(["S. No.", "Task Name", "Entry Point", "Config"])
-    table.title = "Available Environments in Isaac Lab"
-    # set alignment of table columns
+    table.title = "Available SO-ARM101 Environments"
     table.align["Task Name"] = "l"
     table.align["Entry Point"] = "l"
     table.align["Config"] = "l"
 
-    # count of environments
     index = 0
-    # acquire all Isaac environments names
     for task_spec in gym.registry.values():
-        if "Template-" in task_spec.id:
-            # add details to table
+        if "SO-ARM101" in task_spec.id:
             table.add_row([index + 1, task_spec.id, task_spec.entry_point, task_spec.kwargs["env_cfg_entry_point"]])
-            # increment count
             index += 1
 
-    print(table)
+    print(table, flush=True)
 
 
 if __name__ == "__main__":

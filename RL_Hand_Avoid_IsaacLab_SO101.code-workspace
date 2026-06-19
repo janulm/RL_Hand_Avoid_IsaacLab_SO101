@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.analysis.extraPaths": [
+			"source/so_arm101_avoid"
+		],
+		"files.exclude": {
+			"**/__pycache__": true,
+			"**/*.egg-info": true
+		}
+	}
+}
