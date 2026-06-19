@@ -19,10 +19,10 @@ env:
   mask_source: seg
   show_goal_marker: true
   target_resample_time_s: 4.0
-  clamp_targets_to_reach: false
-  target_x_range: [-0.30, 0.30]
-  target_y_range: [-0.30, 0.30]
-  target_z_range: [0.02, 0.40]
+  clamp_targets_to_reach: true   # front + reachable goals
+  target_x_range: [0.05, 0.30]   # +X = forward
+  target_y_range: [-0.18, 0.18]  # +Y left / -Y right
+  target_z_range: [0.05, 0.32]
 
 # --- agent: full skrl PPO config (CNN over camera + MLP over proprio) --------
 agent:
@@ -100,7 +100,7 @@ agent:
     ratio_clip: 0.2
     value_clip: 0.2
     clip_predicted_values: True
-    entropy_loss_scale: 0.01
+    entropy_loss_scale: 0.005
     value_loss_scale: 1.0
     kl_threshold: 0.0
     rewards_shaper_scale: 1.0

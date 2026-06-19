@@ -27,10 +27,16 @@ mkdir -p ~/docker/isaac-sim/cache/{kit,ov,pip,glcache,computecache} \
 # Use a TTY only when one is available (so the script also works non-interactively).
 if [ -t 0 ]; then TTY_FLAGS="-it"; else TTY_FLAGS="-i"; fi
 
+# Match the container's clock to the host so log timestamps use local time
+# instead of defaulting to UTC.
+HOST_TZ="${TZ:-$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null)}"
+
 docker run --name "${CONTAINER_NAME}" ${TTY_FLAGS} --rm \
     --privileged --gpus all --network=host \
     -e "ACCEPT_EULA=Y" -e "PRIVACY_CONSENT=Y" -e "OMNI_KIT_ACCEPT_EULA=YES" \
     -e "PYTHONUNBUFFERED=1" \
+    -e "TZ=${HOST_TZ}" \
+    -v /etc/localtime:/etc/localtime:ro \
     -e DISPLAY \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v "$HOME/.Xauthority:/root/.Xauthority" \

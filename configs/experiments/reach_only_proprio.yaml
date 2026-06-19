@@ -8,7 +8,7 @@
 name: reach_only_proprio
 task: Isaac-SO-ARM101-ReachAvoid-Direct-v0
 num_envs: 2048          # cheap without cameras -> push the GPU (4096 ok on 24GB)
-max_iterations: 300
+max_iterations: 400
 seed: 42
 
 # --- environment overrides (onto SoArm101ReachAvoidEnvCfg; dotted keys ok) ---
@@ -17,10 +17,10 @@ env:
   hand_spawn_prob: 0.0    # pure reach (no obstacle)
   show_goal_marker: true  # green dot in the GUI only (never in the policy input)
   target_resample_time_s: 4.0
-  clamp_targets_to_reach: false
-  target_x_range: [-0.30, 0.30]
-  target_y_range: [-0.30, 0.30]
-  target_z_range: [0.02, 0.40]
+  clamp_targets_to_reach: true   # front + reachable goals (distance can reach ~0)
+  target_x_range: [0.05, 0.30]   # +X = forward
+  target_y_range: [-0.18, 0.18]  # +Y left / -Y right
+  target_z_range: [0.05, 0.32]
   episode_length_s: 8.0
 
 # --- agent: full skrl PPO config (MLP-only; no CNN) --------------------------
@@ -73,7 +73,7 @@ agent:
     ratio_clip: 0.2
     value_clip: 0.2
     clip_predicted_values: True
-    entropy_loss_scale: 0.01
+    entropy_loss_scale: 0.005   # lower than before -> sharper reach (ref uses 0.001)
     value_loss_scale: 1.0
     kl_threshold: 0.0
     rewards_shaper_scale: 1.0

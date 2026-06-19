@@ -64,6 +64,10 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     # so it is visible in the GUI (non-headless) ONLY and is never captured by
     # the policy cameras -- the policy never "sees" the answer.
     show_goal_marker: bool = True
+    # Draw a world-aligned XYZ triad (X=red, Y=green, Z=blue) at each robot base
+    # in the GUI. This is the frame the target box is sampled in, so it lets you
+    # read off which axis is the arm's "front". GUI-only; never in the camera.
+    show_frame_axes: bool = True
     # domain randomization master switch
     domain_randomization: bool = True
 
@@ -87,20 +91,21 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     action_scale = 0.5
 
     # --- task geometry (robot base frame, metres) ---------------------------
-    # Target sampling box, centred on the robot root (env origin). It is
-    # symmetric in x/y so it spans all around the base (front/back/left/right),
-    # not just one side -- this makes the task orientation-agnostic. Targets may
-    # land outside the ~0.30 m reach; the policy still learns to point the
-    # gripper at them (minimising distance). Set clamp_targets_to_reach=True to
-    # restrict targets to the reachable sphere instead.
-    target_x_range = (-0.30, 0.30)
-    target_y_range = (-0.30, 0.30)
-    target_z_range = (0.02, 0.40)
-    clamp_targets_to_reach: bool = False
+    # Target sampling box (robot root frame). Axes (confirmed in the GUI triad):
+    # +X = forward (the direction the arm naturally reaches), +Y = left,
+    # -Y = right, +Z = up. So we sample in FRONT (x>0), symmetric left/right,
+    # and clamp onto the reachable sphere -> every goal is physically reachable
+    # (no "behind the arm" / out-of-reach goals that floor the tip->target
+    # distance). Set clamp_targets_to_reach=False + a symmetric box for the
+    # harder, point-toward-unreachable-goals variant.
+    target_x_range = (0.05, 0.30)
+    target_y_range = (-0.18, 0.18)
+    target_z_range = (0.05, 0.32)
+    clamp_targets_to_reach: bool = True
     # reachability clamp (only used when clamp_targets_to_reach=True):
-    # keep |target - reach_center| <= reach_radius
+    # keep |target - reach_center| <= reach_radius (centred on the shoulder)
     reach_center = (0.0, 0.0, 0.12)
-    reach_radius = 0.30
+    reach_radius = 0.28
     # Resample the target mid-episode every this many seconds (like the reference
     # reach task's 5 s command resampling). 0.0 (or >= episode length) -> fixed
     # target for the whole episode. Gives more reaches per rollout.
@@ -207,6 +212,17 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
     def __post_init__(self):
+        # GUI start view: frame env 0 from a close 3/4 angle looking at the
+        # workspace (purely cosmetic; ignored when headless).
+        self.viewer.origin_type = "env"
+        self.viewer.env_index = 0
+        self.viewer.eye = (0.5, 0.5, 0.45)
+        self.viewer.lookat = (0.0, -0.12, 0.12)
+        # Tighten env spacing for proprio (no cameras -> neighbours can't leak
+        # into an observation). Vision keeps wide spacing so the overhead camera
+        # never sees adjacent envs.
+        self.scene.env_spacing = 1.0 if not self.use_vision else 3.0
+
         # proprio: joint_pos(6) + joint_vel(6) + target_pos(3) + last_action(5)
         proprio_dim = 6 + 6 + 3 + len(self.arm_joint_names)
         proprio_space = gym.spaces.Box(low=-math.inf, high=math.inf, shape=(proprio_dim,))
@@ -360,7 +376,7 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
             has_gui = self.sim.has_gui()
         except Exception:
             has_gui = False
-        if self.cfg.show_goal_marker and has_gui:
+        if (self.cfg.show_goal_marker or self.cfg.show_frame_axes) and has_gui:
             try:
                 from isaacsim.util.debug_draw import _debug_draw
 
@@ -415,6 +431,7 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         proprio = torch.cat([joint_pos_rel, joint_vel, self._target_pos_b, self._actions], dim=-1)
 
         self._draw_goal()
+        self._draw_axes()
 
         obs = {"proprio": proprio}
         if self._use_vision:
@@ -429,6 +446,28 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         n = len(pts)
         self._draw.clear_points()
         self._draw.draw_points(pts, [(0.0, 1.0, 0.2, 1.0)] * n, [14.0] * n)
+
+    def _draw_axes(self):
+        """Overlay a world-aligned XYZ triad at each robot base (GUI only).
+
+        X=red, Y=green, Z=blue. The target box is defined in this (env) frame, so
+        this shows exactly which axis the arm should reach along.
+        """
+        if self._draw is None or not self.cfg.show_frame_axes:
+            return
+        length = 0.25
+        origins = self.robot.data.root_pos_w.detach().cpu().numpy()
+        starts, ends, colors, sizes = [], [], [], []
+        axis_dirs = ((length, 0.0, 0.0), (0.0, length, 0.0), (0.0, 0.0, length))
+        axis_cols = ((1.0, 0.0, 0.0, 1.0), (0.0, 1.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0))
+        for o in origins:
+            for d, c in zip(axis_dirs, axis_cols):
+                starts.append((float(o[0]), float(o[1]), float(o[2])))
+                ends.append((float(o[0] + d[0]), float(o[1] + d[1]), float(o[2] + d[2])))
+                colors.append(c)
+                sizes.append(3.0)
+        self._draw.clear_lines()
+        self._draw.draw_lines(starts, ends, colors, sizes)
 
     def _build_image(self) -> torch.Tensor:
         """Assemble the (N, H, W, C) image: per camera, RGB and/or hand mask."""

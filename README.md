@@ -133,7 +133,7 @@ bonus, a hand-clearance penalty, an action-rate penalty, and a collision penalty
 View live curves with:
 
 ```bash
-./docker/run.sh tensorboard --logdir logs/skrl --bind_all
+CONTAINER_NAME=so101-tb ./docker/run.sh python -m tensorboard.main --logdir logs/skrl --bind_all --port 6006
 # then open http://localhost:6006  (look for reward/total, dist_tip_to_target, ...)
 ```
 
