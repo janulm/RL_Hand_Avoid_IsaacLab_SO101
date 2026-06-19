@@ -20,11 +20,14 @@ import math
 from pathlib import Path
 
 import gymnasium as gym
+import json
+
 import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCamera, TiledCameraCfg
 from isaaclab.sim import SimulationCfg
@@ -48,12 +51,30 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     camera_view: str = "overhead"
     # visual modality channels: "rgb+mask" | "rgb" | "mask"
     obs_mode: str = "rgb+mask"
+    # how the hand mask channel is produced:
+    #   "seg"       -> true silhouette via camera semantic segmentation (matches
+    #                  a MediaPipe hand mask at deploy). Requires the obstacle to
+    #                  carry a ("class", "hand") semantic tag.
+    #   "projected" -> analytic blob from the hand's 3D position (cheaper, no seg).
+    mask_source: str = "seg"
+    # draw a goal marker at the target pose (visible in the GUI / camera)
+    show_goal_marker: bool = True
     # domain randomization master switch
     domain_randomization: bool = True
 
     # --- image resolution fed to the policy ---------------------------------
-    image_height: int = 100
-    image_width: int = 100
+    # 16:9 to match the real overhead webcam (kept small for training throughput).
+    image_height: int = 144
+    image_width: int = 256
+
+    # --- overhead camera, matched to the real rig --------------------------
+    # Real cam: ~150 deg diagonal FOV, 16:9, mounted ~60 cm above the robot root
+    # looking straight down.
+    overhead_height: float = 0.50  # metres above the robot root (env origin)
+    overhead_fov_diag_deg: float = 130.0  # diagonal field of view
+    # "pinhole"  -> rectilinear; the fast TiledCamera renders this exactly.
+    # "fisheye"  -> barrel-distorted wide lens (see note in __post_init__).
+    overhead_projection: str = "pinhole"
 
     # --- timing -------------------------------------------------------------
     decimation = 2  # 60 Hz sim / 2 -> 30 Hz control (matches the Reach task)
@@ -88,23 +109,46 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     )
 
     # --- scene --------------------------------------------------------------
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=3.0)
+    # NOTE: semantic segmentation disables mesh instancing, and the arm mesh is
+    # ~76 MB, so we default to a moderate env count. Bump it for headless runs.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=3.0)
+
+    # --- goal visualization (GUI only; harmless when headless) --------------
+    goal_marker_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/goal_marker",
+        markers={
+            "target": sim_utils.SphereCfg(
+                radius=0.02,
+                visual_material=sim_utils.PreviewSurfaceCfg(emissive_color=(0.0, 1.0, 0.2)),
+            )
+        },
+    )
 
     # --- robot --------------------------------------------------------------
     robot_cfg: ArticulationCfg = SO_ARM101_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     ee_body_name: str = "gripper_link"
     arm_joint_names: tuple = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 
-    # --- moving hand obstacle (kinematic sphere) ----------------------------
+    # --- moving hand/arm obstacle (kinematic mesh) --------------------------
+    # Realistic human arm mesh (recovered from the RL_UR5_IsaacLab reference).
+    # Tagged ("class", "hand") so the camera's semantic segmentation gives a
+    # true silhouette mask -- the same signal a MediaPipe hand mask provides at
+    # deploy time. ``hand_orient`` lays the forearm roughly horizontal so it
+    # sweeps through the workspace pointing at the robot.
+    hand_usd_scale = (0.01, 0.01, 0.01)
+    hand_orient = (0.7071, 0.7071, 0.0, 0.0)  # +90 deg about X -> lay arm down
     hand_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Hand",
-        spawn=sim_utils.SphereCfg(
-            radius=0.07,
+        spawn=sim_utils.UsdFileCfg(
+            # low-poly (~8k tri) decimation of arm.usd -- visually identical at the
+            # policy's render resolution but ~870x smaller. See scripts/decimate_arm.py.
+            usd_path=str(ASSET_DIR / "assets" / "arm_lowpoly.usd"),
+            scale=hand_usd_scale,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.45, 0.35)),
+            semantic_tags=[("class", "hand")],
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.2, 0.0, 0.3)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.2, 0.0, 0.3), rot=hand_orient),
     )
 
     # --- cameras (created on demand depending on camera_view) ---------------
@@ -152,10 +196,42 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
                 "proprio": gym.spaces.Box(low=-math.inf, high=math.inf, shape=(proprio_dim,)),
             }
         )
-        # keep camera cfg resolution in sync
+        # keep camera cfg resolution in sync, and wire up the mask source
+        use_seg = ("mask" in self.obs_mode) and (self.mask_source == "seg")
         for cam in (self.overhead_camera_cfg, self.wrist_camera_cfg):
             cam.height = self.image_height
             cam.width = self.image_width
+            if use_seg and "semantic_segmentation" not in cam.data_types:
+                cam.data_types = list(cam.data_types) + ["semantic_segmentation"]
+                # return raw integer ids (not colorized) so mask = (id != 0)
+                cam.colorize_semantic_segmentation = False
+
+        # --- match the overhead camera to the real rig ---------------------
+        # extrinsics: straight down, `overhead_height` m above the robot root.
+        self.overhead_camera_cfg.offset = TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, self.overhead_height), rot=(1.0, 0.0, 0.0, 0.0), convention="opengl"
+        )
+        # intrinsics: derive the focal length that yields the desired *diagonal*
+        # FOV at the current 16:9 resolution (rectilinear/pinhole geometry).
+        h_ap = 24.0
+        diag_px = math.hypot(self.image_width, self.image_height)
+        tan_half_h = math.tan(math.radians(self.overhead_fov_diag_deg) / 2.0) * (self.image_width / diag_px)
+        focal = h_ap / (2.0 * tan_half_h)
+        if self.overhead_projection == "fisheye":
+            # NOTE: the fast tiled renderer applies pinhole geometry; true barrel
+            # distortion is only produced by the (slower) non-tiled Camera. We still
+            # expose the cfg so it can be swapped if you move off tiled rendering.
+            self.overhead_camera_cfg.spawn = sim_utils.FisheyeCameraCfg(
+                focal_length=focal,
+                horizontal_aperture=h_ap,
+                clipping_range=(0.05, 5.0),
+                projection_type="fisheye_polynomial",
+                fisheye_max_fov=self.overhead_fov_diag_deg,
+            )
+        else:
+            self.overhead_camera_cfg.spawn = sim_utils.PinholeCameraCfg(
+                focal_length=focal, focus_distance=400.0, horizontal_aperture=h_ap, clipping_range=(0.05, 5.0)
+            )
 
 
 @configclass
@@ -192,6 +268,7 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
 
         self._box_min = torch.tensor(self.cfg.hand_box_min, device=self.device)
         self._box_max = torch.tensor(self.cfg.hand_box_max, device=self.device)
+        self._hand_quat = torch.tensor(self.cfg.hand_orient, device=self.device).view(1, 4)
 
         # which cameras are active
         self._use_overhead = self.cfg.camera_view in ("overhead", "both")
@@ -222,6 +299,11 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2500.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+        # goal marker (shows the target the EE should reach, like the SO-101 demo)
+        self._goal_markers = (
+            VisualizationMarkers(self.cfg.goal_marker_cfg) if self.cfg.show_goal_marker else None
+        )
+
     # ----- actions ---------------------------------------------------------
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()
@@ -247,6 +329,9 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         joint_vel = self.robot.data.joint_vel
         proprio = torch.cat([joint_pos_rel, joint_vel, self._target_pos_b, self._actions], dim=-1)
 
+        if self._goal_markers is not None:
+            self._goal_markers.visualize(translations=self._target_pos_b + self.scene.env_origins)
+
         return {"policy": {"camera": image, "proprio": proprio}}
 
     def _build_image(self) -> torch.Tensor:
@@ -260,9 +345,66 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
                 rgb = cam.data.output["rgb"][..., :3].float() / 255.0
                 chans.append(rgb)
             if "mask" in self.cfg.obs_mode:
-                mask = self._project_hand_mask(cam)  # (N, H, W, 1)
+                if self.cfg.mask_source == "seg":
+                    mask = self._seg_hand_mask(cam)  # (N, H, W, 1)
+                else:
+                    mask = self._project_hand_mask(cam)  # (N, H, W, 1)
                 chans.append(mask)
         return torch.cat(chans, dim=-1)
+
+    def _seg_hand_mask(self, cam: TiledCamera) -> torch.Tensor:
+        """True hand silhouette from the camera's semantic segmentation. The arm
+        carries a ("class", "hand") tag; we look up which integer id(s) map to that
+        class via ``idToLabels`` and keep only those pixels. Returns (N,H,W,1)."""
+        seg = cam.data.output["semantic_segmentation"]  # (N, H, W, 1) uint32 ids
+        if seg.dim() == 3:
+            seg = seg.unsqueeze(-1)
+        seg = seg[..., :1]
+
+        ids = self._hand_seg_ids(cam)
+        if not ids:
+            return torch.zeros_like(seg, dtype=torch.float32)
+        id_tensor = torch.tensor(ids, device=seg.device, dtype=seg.dtype)
+        return torch.isin(seg, id_tensor).float()
+
+    def _hand_seg_ids(self, cam: TiledCamera) -> list[int]:
+        """Resolve the segmentation id(s) labelled as the hand class from the
+        camera's idToLabels mapping. The mapping only lists a class once it has
+        been rendered, so we keep probing until found, then cache. ``cam.data.info``
+        is a dict ({'semantic_segmentation': {'idToLabels': {...}}}) but we also
+        tolerate a per-env list form."""
+        if getattr(self, "_hand_seg_id_cache", None):
+            return self._hand_seg_id_cache
+
+        info = getattr(cam.data, "info", None)
+        seg_infos = []
+        if isinstance(info, dict):
+            seg_infos.append(info.get("semantic_segmentation"))
+        elif isinstance(info, (list, tuple)):
+            seg_infos.extend(ei.get("semantic_segmentation") for ei in info if isinstance(ei, dict))
+
+        found: set[int] = set()
+        for seg_info in seg_infos:
+            mapping = seg_info.get("idToLabels", seg_info) if isinstance(seg_info, dict) else seg_info
+            if isinstance(mapping, str):
+                try:
+                    mapping = json.loads(mapping)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(mapping, dict):
+                continue
+            for key, val in mapping.items():
+                label = val.get("class", "") if isinstance(val, dict) else str(val)
+                if "hand" in str(label).lower():
+                    try:
+                        found.add(int(key))
+                    except (TypeError, ValueError):
+                        pass
+
+        ids = sorted(found)
+        if ids:
+            self._hand_seg_id_cache = ids
+        return ids
 
     def _project_hand_mask(self, cam: TiledCamera) -> torch.Tensor:
         """Render a binary hand mask by projecting the hand sphere into the
@@ -379,7 +521,6 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
             hand_pos_b = self._hand_pos_b[env_ids]
             origins = self.scene.env_origins[env_ids]
         pos_w = hand_pos_b + origins
-        quat = torch.zeros(pos_w.shape[0], 4, device=self.device)
-        quat[:, 0] = 1.0
+        quat = self._hand_quat.expand(pos_w.shape[0], 4)
         root_pose = torch.cat([pos_w, quat], dim=-1)
         self.hand.write_root_pose_to_sim(root_pose, env_ids=env_ids)

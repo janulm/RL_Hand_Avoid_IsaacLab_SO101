@@ -118,9 +118,19 @@ Keep sim, eval, and deploy in agreement on these.
 **Action**: 5 arm joint-position targets (gripper unused), applied as
 `target = default_joint_pos + action_scale * action`.
 
-The hand mask is produced in sim by analytically projecting the hand sphere into
-the camera (intrinsics + extrinsics) — the same binary hand/not-hand blob we get
-from MediaPipe at deploy time.
+The obstacle is a **realistic human-arm mesh** (tagged `class:hand`). By default
+the hand mask is the **true silhouette** taken from the camera's semantic
+segmentation (`mask_source="seg"`) — the same hand/not-hand signal a MediaPipe
+mask gives at deploy time. A cheaper analytic blob projected from the hand's 3D
+position is available as `mask_source="projected"` (no segmentation render).
+
+A green **goal marker** is drawn at the sampled target so you can see, in the GUI
+and in the camera RGB, where the end-effector should reach.
+
+The arm mesh ships pre-decimated (`arm_lowpoly.usd`, ~8k tris) since the original
+is ~1M tris of pure geometry — invisible at the policy's render resolution but far
+heavier. Regenerate at any budget with `scripts/decimate_arm.py` (e.g.
+`./docker/run.sh bash -c "python -m pip install -q fast-simplification && python scripts/decimate_arm.py --target_tris 3000"`).
 
 ---
 
@@ -130,6 +140,8 @@ from MediaPipe at deploy time.
 |-------|---------|-----------------|
 | `camera_view` | `"overhead"` | `"overhead"`, `"wrist"`, `"both"` |
 | `obs_mode` | `"rgb+mask"` | `"rgb+mask"`, `"rgb"`, `"mask"` |
+| `mask_source` | `"seg"` | `"seg"` (true silhouette) or `"projected"` (analytic blob) |
+| `show_goal_marker` | `True` | draw the green target marker (GUI/RGB) |
 | `domain_randomization` | `True` | **stub** — not yet implemented |
 | `image_height/width` | `100` | policy image resolution |
 | reward weights | — | `w_track`, `w_clearance`, `clearance_std`, `collision_distance`, ... |
@@ -143,7 +155,8 @@ shaping).
 
 - [x] Dockerized Isaac Lab (shareable, GUI + USB passthrough).
 - [x] Direct-workflow `ReachAvoid` env (SO-101 + camera + moving hand).
-- [x] RGB + hand-mask Dict observation (verified aligned via `debug_camera.py`).
+- [x] RGB + true-silhouette hand-mask Dict observation (verified aligned via `debug_camera.py`).
+- [x] Realistic human-arm obstacle (semantic segmentation) + goal marker.
 - [x] skrl PPO (CNN + MLP) pipeline validated (camera is actually used).
 - [ ] Domain randomization + reward tuning.
 - [ ] Eval harness (success %, collision %, min-clearance) + plots.

@@ -23,6 +23,8 @@ parser.add_argument("--steps", type=int, default=60)
 parser.add_argument("--out", type=str, default="verification_output/camera_debug")
 parser.add_argument("--upscale", type=int, default=4, help="Integer upscale factor for the tiny images.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Optional skrl checkpoint to drive the arm.")
+parser.add_argument("--projection", type=str, default=None, choices=["pinhole", "fisheye"],
+                    help="Override the overhead camera projection for this run.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -94,6 +96,9 @@ def main():
     cfg = SoArm101ReachAvoidEnvCfg()
     cfg.scene.num_envs = args_cli.num_envs
     cfg.domain_randomization = False
+    if args_cli.projection:
+        cfg.overhead_projection = args_cli.projection
+        cfg.__post_init__()
     env = SoArm101ReachAvoidEnv(cfg)
     layout = split_channels(cfg)
 

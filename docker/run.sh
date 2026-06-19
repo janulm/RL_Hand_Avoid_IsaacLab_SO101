@@ -24,9 +24,13 @@ xhost +local:root >/dev/null 2>&1 || xhost + >/dev/null 2>&1 || true
 mkdir -p ~/docker/isaac-sim/cache/{kit,ov,pip,glcache,computecache} \
          ~/docker/isaac-sim/{logs,data,documents}
 
-docker run --name "${CONTAINER_NAME}" -it --rm \
+# Use a TTY only when one is available (so the script also works non-interactively).
+if [ -t 0 ]; then TTY_FLAGS="-it"; else TTY_FLAGS="-i"; fi
+
+docker run --name "${CONTAINER_NAME}" ${TTY_FLAGS} --rm \
     --privileged --gpus all --network=host \
     -e "ACCEPT_EULA=Y" -e "PRIVACY_CONSENT=Y" -e "OMNI_KIT_ACCEPT_EULA=YES" \
+    -e "PYTHONUNBUFFERED=1" \
     -e DISPLAY \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v "$HOME/.Xauthority:/root/.Xauthority" \
