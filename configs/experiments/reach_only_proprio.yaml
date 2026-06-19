@@ -15,6 +15,7 @@ seed: 42
 env:
   use_vision: false       # no cameras created, proprio-only observation
   hand_spawn_prob: 0.0    # pure reach (no obstacle)
+  action_scale: 1.0       # sweep winner: ~3.7cm vs ~8.7cm at 0.5 (see env default)
   show_goal_marker: true  # green dot in the GUI only (never in the policy input)
   target_resample_time_s: 4.0
   clamp_targets_to_reach: true   # front + reachable goals (distance can reach ~0)

@@ -77,6 +77,25 @@ parser.add_argument(
     "--max_iterations", type=int, default=None, help="RL Policy training iterations."
 )
 parser.add_argument(
+    "--set",
+    action="append",
+    default=[],
+    dest="overrides",
+    metavar="KEY=VALUE",
+    help=(
+        "Ad-hoc override (repeatable). Prefix with 'env.' for env cfg fields "
+        "(e.g. env.action_scale=0.75, env.w_action_rate=1e-4) or 'agent.' for "
+        "the skrl agent dict (e.g. agent.agent.entropy_loss_scale=0.002). Values "
+        "are parsed as YAML. Applied on top of --exp_config; great for sweeps."
+    ),
+)
+parser.add_argument(
+    "--run_name",
+    type=str,
+    default=None,
+    help="Override the experiment/run name (folder = '<run_name>_<timestamp>').",
+)
+parser.add_argument(
     "--export_io_descriptors",
     action="store_true",
     default=False,
@@ -200,6 +219,46 @@ def _apply_env_overrides(env_cfg, overrides: dict):
             continue
         setattr(obj, parts[-1], value)
 
+
+def _apply_dict_overrides(d: dict, overrides: dict):
+    """Apply dotted-key overrides onto a nested dict (e.g. the agent cfg)."""
+    for key, value in (overrides or {}).items():
+        obj = d
+        parts = key.split(".")
+        for p in parts[:-1]:
+            obj = obj[p]
+        obj[parts[-1]] = value
+
+
+def _parse_set_overrides(items: list):
+    """Split --set KEY=VALUE items into (env_overrides, agent_overrides).
+
+    Keys prefixed 'env.' go to the env cfg, 'agent.' to the agent dict; bare
+    keys default to env. Values are parsed as YAML (so 0.75, 1e-4, true, [a,b]).
+    """
+    import yaml as _yaml
+
+    env_ov, agent_ov = {}, {}
+    for item in items or []:
+        if "=" not in item:
+            logger.warning(f"[--set] ignoring malformed override '{item}' (need KEY=VALUE)")
+            continue
+        key, raw = item.split("=", 1)
+        value = _yaml.safe_load(raw)
+        # YAML 1.1 doesn't treat '1e-4' as a float (needs '1.0e-4'); recover it.
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except ValueError:
+                pass
+        if key.startswith("agent."):
+            agent_ov[key[len("agent."):]] = value
+        elif key.startswith("env."):
+            env_ov[key[len("env."):]] = value
+        else:
+            env_ov[key] = value
+    return env_ov, agent_ov
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 # config shortcuts
@@ -233,12 +292,18 @@ def main(
     if EXP_CFG is not None and isinstance(EXP_CFG.get("agent"), dict):
         agent_cfg = EXP_CFG["agent"]
 
-    # apply experiment env overrides, then rebuild derived fields (observation
-    # space, camera cfgs) since those are computed in __post_init__.
-    if EXP_CFG is not None:
-        _apply_env_overrides(env_cfg, EXP_CFG.get("env", {}))
+    # apply experiment env overrides + any --set overrides, then rebuild derived
+    # fields (observation space, camera cfgs) since those compute in __post_init__.
+    cli_env_ov, cli_agent_ov = _parse_set_overrides(args_cli.overrides)
+    env_overrides = dict(EXP_CFG.get("env", {})) if EXP_CFG is not None else {}
+    env_overrides.update(cli_env_ov)
+    if env_overrides:
+        _apply_env_overrides(env_cfg, env_overrides)
         if hasattr(env_cfg, "__post_init__"):
             env_cfg.__post_init__()
+    if cli_agent_ov:
+        _apply_dict_overrides(agent_cfg, cli_agent_ov)
+        print(f"[INFO] --set agent overrides: {cli_agent_ov}")
 
     # check for invalid combination of CPU device with distributed training
     if (
@@ -286,7 +351,7 @@ def main(
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs.
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    exp_name = EXP_CFG.get("name") if EXP_CFG else None
+    exp_name = args_cli.run_name or (EXP_CFG.get("name") if EXP_CFG else None)
     if exp_name:
         # experiment-config runs: '<config name>_<timestamp>'
         log_dir = f"{exp_name}_{timestamp}"

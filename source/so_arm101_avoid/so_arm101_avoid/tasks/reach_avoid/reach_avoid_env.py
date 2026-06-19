@@ -88,7 +88,10 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     # --- timing -------------------------------------------------------------
     decimation = 2  # 60 Hz sim / 2 -> 30 Hz control (matches the Reach task)
     episode_length_s = 8.0
-    action_scale = 0.5
+    # +-1.0 rad of joint authority. A sweep showed 0.5 capped the reach error at
+    # ~8 cm (not enough range to strike poses); 1.0 halved it to ~3.7 cm, and
+    # going higher (1.5-2.0) gave no gain but jerkier motion (worse for sim2real).
+    action_scale = 1.0
 
     # --- task geometry (robot base frame, metres) ---------------------------
     # Target sampling box (robot root frame). Axes (confirmed in the GUI triad):

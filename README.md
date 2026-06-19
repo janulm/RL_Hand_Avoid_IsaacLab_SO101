@@ -107,8 +107,13 @@ shader/asset caches under `~/docker/isaac-sim/` so the 2nd+ launch is fast.
     --exp_config configs/experiments/reach_only_proprio.yaml
 ```
 
-> Tip: `--max_iterations N` and `--num_envs N` are handy for short runs, and
-> override the values from an `--exp_config` when passed.
+> Tip: `--max_iterations N` and `--num_envs N` are handy for short runs and
+> override the values from an `--exp_config`. For quick sweeps, `train.py` also
+> takes `--run_name NAME` and repeatable `--set KEY=VALUE` overrides (YAML-parsed,
+> sci-notation safe) on top of a config, e.g.
+> `--run_name try_hi --set env.action_scale=1.0 --set agent.agent.entropy_loss_scale=0.002`.
+> Use `env.` for env-cfg fields and `agent.` for the skrl agent dict. Each run's
+> fully-resolved config is dumped to `<run_dir>/params/{env,agent}.yaml`.
 
 ---
 
@@ -143,13 +148,13 @@ segmentation (`mask_source="seg"`) — the same hand/not-hand signal a MediaPipe
 mask gives at deploy time. A cheaper analytic blob projected from the hand's 3D
 position is available as `mask_source="projected"` (no segmentation render).
 
-A green **goal marker** is drawn at the sampled target so you can see where the
-end-effector should reach. It is a **debug-draw overlay**, so it shows up only in
-the **GUI viewport (non-headless)** and is **never captured by the policy
-cameras** — the policy never "sees" the answer. Targets are sampled in a box
-(`target_*_range`) and clamped onto a reachable sphere (`reach_center` /
-`reach_radius`) so a large box never yields an out-of-reach corner (the SO-101
-has only ~0.30 m of reach).
+A green **goal marker** (and an XYZ **base triad**: X=red/Y=green/Z=blue) is drawn
+in the GUI. Both are **debug-draw overlays**, so they show up only in the **GUI
+viewport (non-headless)** and are **never captured by the policy cameras** — the
+policy never "sees" the answer. Targets are sampled in a box (`target_*_range`) in
+front of the arm (**+X = forward**) and clamped onto a reachable sphere
+(`reach_center` / `reach_radius`) so every goal is physically reachable (the
+SO-101 has only ~0.28 m of reach).
 
 The arm mesh ships pre-decimated (`arm_lowpoly.usd`, ~8k tris) since the original
 is ~1M tris of pure geometry — invisible at the policy's render resolution but far
@@ -162,19 +167,21 @@ heavier. Regenerate at any budget with `scripts/decimate_arm.py` (e.g.
 
 | Field | Default | Options / notes |
 |-------|---------|-----------------|
-| `use_vision` | `True` | `False` → proprio-only obs, no cameras (fast reach smoke test; pair with the proprio agent cfg) |
+| `use_vision` | `True` | `False` → proprio-only obs, no cameras (fast reach smoke test; see `reach_only_proprio.yaml`) |
 | `camera_view` | `"overhead"` | `"overhead"`, `"wrist"`, `"both"` |
 | `obs_mode` | `"rgb+mask"` | `"rgb+mask"`, `"rgb"`, `"mask"` |
 | `hand_spawn_prob` | `0.0` | per-env probability the hand obstacle is present (curriculum: 0 = pure reach) |
-| `target_*_range` | ±0.30 / ±0.30 / 0.02..0.40 | target sampling box, symmetric around the root (m) |
-| `clamp_targets_to_reach` | `False` | `True` → clamp targets onto the reachable sphere; `False` → allow out-of-reach targets (minimise distance) |
+| `action_scale` | `1.0` | joint authority: `target = default + action_scale·action`. A sweep showed `0.5` capped reach error at ~8 cm; `1.0` ≈ 3.7 cm; higher gave no gain but jerkier motion |
+| `target_*_range` | x 0.05..0.30 / y ±0.18 / z 0.05..0.32 | target sampling box in the root frame (**+X = forward, +Y = left, +Z = up**); sampled in front of the arm |
+| `clamp_targets_to_reach` | `True` | `True` → clamp targets onto the reachable sphere (every goal reachable); `False` + a symmetric box → allow out-of-reach targets (just minimise distance) |
 | `target_resample_time_s` | `4.0` | resample the target mid-episode every N s (≈2 reaches/episode); `0` → fixed per episode |
 | `noise_joint_pos` / `noise_joint_vel` | `0.01` / `0.01` | sim2real obs noise on joints (only when `domain_randomization=True`) |
-| `reach_center` / `reach_radius` | `(0,0,0.12)` / `0.30` | the reachable sphere used when clamping is on |
+| `reach_center` / `reach_radius` | `(0,0,0.12)` / `0.28` | the reachable sphere used when clamping is on |
 | `ee_offset` | `(-0.008,0,-0.098)` | gripper-tip offset (m, in `gripper_link` frame); the reward distance is measured to this point |
 | `mask_source` | `"seg"` | `"seg"` (true silhouette) or `"projected"` (analytic blob) |
 | `show_goal_marker` | `True` | green target overlay — **GUI only, never in the policy cameras** |
-| `domain_randomization` | `True` | **stub** — not yet implemented |
+| `show_frame_axes` | `True` | XYZ triad (X=red/Y=green/Z=blue) at each base — **GUI only**; shows the frame the target box is sampled in |
+| `domain_randomization` | `True` | currently enables joint observation noise; more DR (lighting/appearance/dynamics) planned |
 | `image_height/width` | `144`/`256` | policy image resolution |
 | reward weights | — | `w_track`, `w_clearance`, `clearance_std`, `collision_distance`, ... |
 
@@ -201,10 +208,22 @@ checkpoints land in `logs/skrl/so101_reachavoid/<name>_<timestamp>/`.
 ./docker/run.sh python scripts/skrl/train.py --headless \
     --exp_config configs/experiments/reach_avoid.yaml
 
-# play the latest run of an experiment (same env + network, auto-finds checkpoint)
+# play the latest run of an experiment (auto-loads best_agent.pt of the newest run)
 ./docker/run.sh python scripts/skrl/play.py \
-    --exp_config configs/experiments/reach_only_proprio.yaml
+    --exp_config configs/experiments/reach_only_proprio.yaml --num_envs 16
+
+# ...or play a specific checkpoint (e.g. the final snapshot)
+./docker/run.sh python scripts/skrl/play.py \
+    --exp_config configs/experiments/reach_only_proprio.yaml --num_envs 16 \
+    --checkpoint logs/skrl/so101_reachavoid/reach_only_proprio_<TS>/checkpoints/agent_9600.pt
 ```
+
+Each run saves periodic `agent_<step>.pt` snapshots plus `best_agent.pt` (skrl's
+highest-mean-reward checkpoint) under `<run_dir>/checkpoints/`. With no
+`--checkpoint`, play auto-loads `best_agent.pt` from the most recent matching run.
+
+In the GUI viewport, **right-mouse + WASD** flies the camera (Q/E = down/up),
+**middle-mouse** pans, scroll zooms, and **F** focuses the selected prim.
 
 See `configs/experiments/README.md` for the schema. (`agents/skrl_ppo_cfg.yaml`
 is only the framework default for plain `--task` runs without `--exp_config`.)
@@ -220,10 +239,28 @@ is only the framework default for plain `--task` runs without `--exp_config`.)
 - [x] skrl PPO (CNN + MLP) pipeline validated (camera is actually used).
 - [x] Proprio-only mode (`use_vision: false`) + experiment-config training (`--exp_config`, named/timestamped checkpoints).
 - [x] Mid-episode target resampling + joint observation noise (first DR piece).
-- [ ] More domain randomization (lighting, hand appearance, dynamics) + reward tuning.
-- [ ] Eval harness (success %, collision %, min-clearance) + plots.
-- [ ] LeRobot deploy bridge (camera + joints → policy → joint targets, safety clamp).
-- [ ] Real-robot avoidance video. ArUco-glove perception as a fallback.
+- [x] Proprio reach tuned: forward+reachable targets and an `action_scale` sweep took tip→target error from ~8.7 cm to ~3.7 cm.
+
+**Deployment-first plan.** Each stage must **verify a working deploy on the real
+SO-101 before moving on**. Perception is added bottom-up: **binary arm/no-arm mask
+first, RGB only once that works.**
+
+- [ ] **Deploy proprio reach** on the physical LeRobot follower: drive the trained reach policy with hard-coded target points; verify physics, joint mapping, and that the motion is safe/sane.
+- [ ] **Deploy vision reach (mask-only)**: train a policy with visual input — the **binary arm/no-arm mask only** — whose task is still to reach a hard-coded target; verify it deploys.
+- [ ] **Fix arm integration / orientation** in sim (the arm is currently visually mis-oriented) so sim and real agree.
+- [ ] **Train with arm detection in sim**: feed the segmentation mask of the arm/hand obstacle (still mask-only); verify deploy.
+- [ ] **Real-camera segmentation**: produce the arm/no-arm mask from the physical camera at deploy time, matching the mask the policy trained on.
+
+> **Hackathon baseline** = everything above working end-to-end (mask-only, overhead camera).
+
+Then, building on the baseline (re-verify deploy after each step):
+
+- [ ] Integrate **RGB** on top of the mask (4-channel), only once mask-only is solid.
+- [ ] **Sim realism for RGB**: white table/floor, real-matching (color-block) robot colors, and randomized lighting / shadows / brightness so the real camera isn't confused.
+- [ ] Match **camera intrinsics / extrinsics** to the real overhead camera.
+- [ ] **Multiple cameras**: add the wrist camera alongside the overhead (overhead-only until here).
+- [ ] **Stronger domain randomization** (lighting, hand appearance, dynamics) + RL env / reward tuning.
+- [ ] **Eval harness** (success %, collision %, min-clearance) + plots, and a **real-robot avoidance video**. ArUco-glove perception as a fallback.
 
 ---
 

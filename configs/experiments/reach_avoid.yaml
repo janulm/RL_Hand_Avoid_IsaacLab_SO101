@@ -14,6 +14,7 @@ seed: 42
 env:
   use_vision: true
   hand_spawn_prob: 0.8
+  action_scale: 1.0       # sweep winner (proprio); see env default
   hand_speed_range: [0.25, 0.60]
   camera_view: overhead
   obs_mode: rgb+mask
