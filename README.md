@@ -40,8 +40,9 @@ which is what this repo does.
 
 ```
 docker/                     # Dockerized Isaac Lab (build.sh, run.sh, Dockerfile)
+configs/experiments/        # self-contained experiment files (env + full agent), one per run
 scripts/
-  skrl/train.py, play.py    # skrl PPO training / playback
+  skrl/train.py, play.py    # skrl PPO training / playback (take --exp_config)
   list_envs.py              # list registered SO-ARM101 tasks
   smoke_test.py             # quick env sanity check (reset + step)
   debug_camera.py           # dump RGB|mask|overlay frames of the policy input
@@ -50,7 +51,7 @@ scripts/
 source/so_arm101_avoid/     # the Isaac Lab extension (our env lives here)
   so_arm101_avoid/
     robots/trs_so101/       # vendored SO-101 URDF + ArticulationCfg
-    tasks/reach_avoid/      # Direct ReachAvoid env + cfg + skrl agent yaml
+    tasks/reach_avoid/      # Direct ReachAvoid env + cfg + default agent yaml (fallback)
 ```
 
 Registered tasks:
@@ -91,16 +92,23 @@ shader/asset caches under `~/docker/isaac-sim/` so the 2nd+ launch is fast.
 ./docker/run.sh python scripts/debug_camera.py --headless --steps 60
 #   -> verification_output/camera_debug/
 
-# Train (headless). --enable_cameras is required for the image observation.
+# Train via an experiment config (recommended -- see "Experiment configs" below).
+# Each config is self-contained (env + full agent); cameras auto-enable unless
+# the config sets use_vision: false.
+./docker/run.sh python scripts/skrl/train.py --headless \
+    --exp_config configs/experiments/reach_only_proprio.yaml
+
+# Or train directly from the CLI (uses the default agent; --enable_cameras for vision).
 ./docker/run.sh python scripts/skrl/train.py \
     --task Isaac-SO-ARM101-ReachAvoid-Direct-v0 --headless --enable_cameras
 
-# Watch a trained policy in the GUI
+# Watch a trained policy in the GUI (same experiment -> same env + network)
 ./docker/run.sh python scripts/skrl/play.py \
-    --task Isaac-SO-ARM101-ReachAvoid-Direct-Play-v0 --enable_cameras
+    --exp_config configs/experiments/reach_only_proprio.yaml
 ```
 
-> Tip: `--max_iterations N` and `--num_envs N` are handy for short runs.
+> Tip: `--max_iterations N` and `--num_envs N` are handy for short runs, and
+> override the values from an `--exp_config` when passed.
 
 ---
 
@@ -118,14 +126,30 @@ Keep sim, eval, and deploy in agreement on these.
 **Action**: 5 arm joint-position targets (gripper unused), applied as
 `target = default_joint_pos + action_scale * action`.
 
+**Reward** (logged per-term to TensorBoard under `Info / ...`): the main term is
+`-w_track * dist`, where `dist` is the Euclidean distance from the **gripper tip**
+(`gripper_link` + `ee_offset`) to the target point, plus a fine `tanh` shaping
+bonus, a hand-clearance penalty, an action-rate penalty, and a collision penalty.
+View live curves with:
+
+```bash
+./docker/run.sh tensorboard --logdir logs/skrl --bind_all
+# then open http://localhost:6006  (look for reward/total, dist_tip_to_target, ...)
+```
+
 The obstacle is a **realistic human-arm mesh** (tagged `class:hand`). By default
 the hand mask is the **true silhouette** taken from the camera's semantic
 segmentation (`mask_source="seg"`) — the same hand/not-hand signal a MediaPipe
 mask gives at deploy time. A cheaper analytic blob projected from the hand's 3D
 position is available as `mask_source="projected"` (no segmentation render).
 
-A green **goal marker** is drawn at the sampled target so you can see, in the GUI
-and in the camera RGB, where the end-effector should reach.
+A green **goal marker** is drawn at the sampled target so you can see where the
+end-effector should reach. It is a **debug-draw overlay**, so it shows up only in
+the **GUI viewport (non-headless)** and is **never captured by the policy
+cameras** — the policy never "sees" the answer. Targets are sampled in a box
+(`target_*_range`) and clamped onto a reachable sphere (`reach_center` /
+`reach_radius`) so a large box never yields an out-of-reach corner (the SO-101
+has only ~0.30 m of reach).
 
 The arm mesh ships pre-decimated (`arm_lowpoly.usd`, ~8k tris) since the original
 is ~1M tris of pure geometry — invisible at the policy's render resolution but far
@@ -138,16 +162,52 @@ heavier. Regenerate at any budget with `scripts/decimate_arm.py` (e.g.
 
 | Field | Default | Options / notes |
 |-------|---------|-----------------|
+| `use_vision` | `True` | `False` → proprio-only obs, no cameras (fast reach smoke test; pair with the proprio agent cfg) |
 | `camera_view` | `"overhead"` | `"overhead"`, `"wrist"`, `"both"` |
 | `obs_mode` | `"rgb+mask"` | `"rgb+mask"`, `"rgb"`, `"mask"` |
+| `hand_spawn_prob` | `0.0` | per-env probability the hand obstacle is present (curriculum: 0 = pure reach) |
+| `target_*_range` | ±0.30 / ±0.30 / 0.02..0.40 | target sampling box, symmetric around the root (m) |
+| `clamp_targets_to_reach` | `False` | `True` → clamp targets onto the reachable sphere; `False` → allow out-of-reach targets (minimise distance) |
+| `target_resample_time_s` | `4.0` | resample the target mid-episode every N s (≈2 reaches/episode); `0` → fixed per episode |
+| `noise_joint_pos` / `noise_joint_vel` | `0.01` / `0.01` | sim2real obs noise on joints (only when `domain_randomization=True`) |
+| `reach_center` / `reach_radius` | `(0,0,0.12)` / `0.30` | the reachable sphere used when clamping is on |
+| `ee_offset` | `(-0.008,0,-0.098)` | gripper-tip offset (m, in `gripper_link` frame); the reward distance is measured to this point |
 | `mask_source` | `"seg"` | `"seg"` (true silhouette) or `"projected"` (analytic blob) |
-| `show_goal_marker` | `True` | draw the green target marker (GUI/RGB) |
+| `show_goal_marker` | `True` | green target overlay — **GUI only, never in the policy cameras** |
 | `domain_randomization` | `True` | **stub** — not yet implemented |
-| `image_height/width` | `100` | policy image resolution |
+| `image_height/width` | `144`/`256` | policy image resolution |
 | reward weights | — | `w_track`, `w_clearance`, `clearance_std`, `collision_distance`, ... |
 
 These flags are the levers for the planned ablations (modality, DR, reward
 shaping).
+
+### Experiment configs (recommended way to train)
+
+Each file in `configs/experiments/*.yaml` is **one self-contained experiment**:
+run name, task, env overrides (hand spawn, target sampling, vision on/off, ...)
+**and the full agent** (network + PPO hyperparameters). Launch with `--exp_config`;
+checkpoints land in `logs/skrl/so101_reachavoid/<name>_<timestamp>/`.
+
+```bash
+# 1) fastest sanity check: proprio-only reach (no cameras)
+./docker/run.sh python scripts/skrl/train.py --headless \
+    --exp_config configs/experiments/reach_only_proprio.yaml
+
+# 2) reach with the camera/CNN path
+./docker/run.sh python scripts/skrl/train.py --headless \
+    --exp_config configs/experiments/reach_only_vision.yaml
+
+# 3) full reach-avoid
+./docker/run.sh python scripts/skrl/train.py --headless \
+    --exp_config configs/experiments/reach_avoid.yaml
+
+# play the latest run of an experiment (same env + network, auto-finds checkpoint)
+./docker/run.sh python scripts/skrl/play.py \
+    --exp_config configs/experiments/reach_only_proprio.yaml
+```
+
+See `configs/experiments/README.md` for the schema. (`agents/skrl_ppo_cfg.yaml`
+is only the framework default for plain `--task` runs without `--exp_config`.)
 
 ---
 
@@ -158,7 +218,9 @@ shaping).
 - [x] RGB + true-silhouette hand-mask Dict observation (verified aligned via `debug_camera.py`).
 - [x] Realistic human-arm obstacle (semantic segmentation) + goal marker.
 - [x] skrl PPO (CNN + MLP) pipeline validated (camera is actually used).
-- [ ] Domain randomization + reward tuning.
+- [x] Proprio-only mode (`use_vision: false`) + experiment-config training (`--exp_config`, named/timestamped checkpoints).
+- [x] Mid-episode target resampling + joint observation noise (first DR piece).
+- [ ] More domain randomization (lighting, hand appearance, dynamics) + reward tuning.
 - [ ] Eval harness (success %, collision %, min-clearance) + plots.
 - [ ] LeRobot deploy bridge (camera + joints → policy → joint targets, safety clamp).
 - [ ] Real-robot avoidance video. ArUco-glove perception as a fallback.

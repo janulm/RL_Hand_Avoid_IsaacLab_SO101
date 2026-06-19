@@ -27,12 +27,11 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
-from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCamera, TiledCameraCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply_inverse, sample_uniform
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, sample_uniform
 
 from so_arm101_avoid.robots import SO_ARM101_CFG
 
@@ -47,6 +46,10 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     """Configuration for the SO-ARM101 Reach-Avoid direct environment."""
 
     # --- experiment knobs (used by the ablations later) ---------------------
+    # master switch for the visual pathway. False -> proprio-only observation
+    # (no cameras created, no image channels). Handy to validate the reach
+    # pipeline cheaply before adding vision. Requires a proprio-only agent cfg.
+    use_vision: bool = True
     # which camera(s) feed the policy: "overhead" | "wrist" | "both"
     camera_view: str = "overhead"
     # visual modality channels: "rgb+mask" | "rgb" | "mask"
@@ -57,7 +60,9 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     #                  carry a ("class", "hand") semantic tag.
     #   "projected" -> analytic blob from the hand's 3D position (cheaper, no seg).
     mask_source: str = "seg"
-    # draw a goal marker at the target pose (visible in the GUI / camera)
+    # draw a goal marker at the target pose. Rendered as a debug-draw overlay,
+    # so it is visible in the GUI (non-headless) ONLY and is never captured by
+    # the policy cameras -- the policy never "sees" the answer.
     show_goal_marker: bool = True
     # domain randomization master switch
     domain_randomization: bool = True
@@ -82,15 +87,42 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     action_scale = 0.5
 
     # --- task geometry (robot base frame, metres) ---------------------------
-    # target sampling box (relative to the robot base)
-    target_x_range = (-0.10, 0.10)
-    target_y_range = (-0.25, -0.10)
-    target_z_range = (0.10, 0.30)
+    # Target sampling box, centred on the robot root (env origin). It is
+    # symmetric in x/y so it spans all around the base (front/back/left/right),
+    # not just one side -- this makes the task orientation-agnostic. Targets may
+    # land outside the ~0.30 m reach; the policy still learns to point the
+    # gripper at them (minimising distance). Set clamp_targets_to_reach=True to
+    # restrict targets to the reachable sphere instead.
+    target_x_range = (-0.30, 0.30)
+    target_y_range = (-0.30, 0.30)
+    target_z_range = (0.02, 0.40)
+    clamp_targets_to_reach: bool = False
+    # reachability clamp (only used when clamp_targets_to_reach=True):
+    # keep |target - reach_center| <= reach_radius
+    reach_center = (0.0, 0.0, 0.12)
+    reach_radius = 0.30
+    # Resample the target mid-episode every this many seconds (like the reference
+    # reach task's 5 s command resampling). 0.0 (or >= episode length) -> fixed
+    # target for the whole episode. Gives more reaches per rollout.
+    target_resample_time_s: float = 4.0
+
+    # --- observation noise (sim2real DR; only active when domain_randomization) -
+    # Uniform noise added to the proprio joint terms, matching the reference
+    # reach task (+-0.01). Disabled in the PLAY cfg.
+    noise_joint_pos = 0.01  # rad
+    noise_joint_vel = 0.01  # rad/s
     # hand spawns on a shell around the workspace and sweeps across it
     hand_radius = 0.07  # ~size of a fist; matches hand_cfg sphere radius below
     hand_speed_range = (0.25, 0.60)  # m/s -- lively approach/retreat
     hand_box_min = (-0.30, -0.40, 0.05)
     hand_box_max = (0.30, 0.40, 0.45)
+    # Per-environment probability (resampled every episode) that the hand is
+    # present. 0.0 -> pure reach task (no obstacle); 1.0 -> hand always present.
+    # Use this as a curriculum: train reaching first, then ramp this up.
+    hand_spawn_prob: float = 0.0
+    # Where inactive hands are parked: far below the floor and beyond the camera
+    # far-clip, so they are invisible and never affect clearance/collision.
+    hand_parked_pos = (0.0, 0.0, -10.0)
 
     # --- reward weights -----------------------------------------------------
     w_track = 0.30
@@ -113,20 +145,13 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     # ~76 MB, so we default to a moderate env count. Bump it for headless runs.
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=3.0)
 
-    # --- goal visualization (GUI only; harmless when headless) --------------
-    goal_marker_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/goal_marker",
-        markers={
-            "target": sim_utils.SphereCfg(
-                radius=0.02,
-                visual_material=sim_utils.PreviewSurfaceCfg(emissive_color=(0.0, 1.0, 0.2)),
-            )
-        },
-    )
-
     # --- robot --------------------------------------------------------------
     robot_cfg: ArticulationCfg = SO_ARM101_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # The TCP/fingertip frame (gripper_frame_link) was merged into gripper_link by
+    # the URDF importer, so we track gripper_link and add this fixed offset (taken
+    # from the gripper_frame_joint origin) to land on the end of the gripper.
     ee_body_name: str = "gripper_link"
+    ee_offset = (-0.0079, -0.0002, -0.0981)  # metres, in gripper_link frame
     arm_joint_names: tuple = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 
     # --- moving hand/arm obstacle (kinematic mesh) --------------------------
@@ -182,18 +207,26 @@ class SoArm101ReachAvoidEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
     def __post_init__(self):
+        # proprio: joint_pos(6) + joint_vel(6) + target_pos(3) + last_action(5)
+        proprio_dim = 6 + 6 + 3 + len(self.arm_joint_names)
+        proprio_space = gym.spaces.Box(low=-math.inf, high=math.inf, shape=(proprio_dim,))
+
+        # Proprio-only mode: no cameras, no image channel. The observation is a
+        # Dict with a single "proprio" key (pair with the proprio agent cfg).
+        if not self.use_vision:
+            self.observation_space = gym.spaces.Dict({"proprio": proprio_space})
+            return
+
         # number of image channels
         n_rgb = 3 if "rgb" in self.obs_mode else 0
         n_mask = 1 if "mask" in self.obs_mode else 0
         c = n_rgb + n_mask
         n_cams = 2 if self.camera_view == "both" else 1
         c *= n_cams
-        # proprio: joint_pos(6) + joint_vel(6) + target_pos(3) + last_action(5)
-        proprio_dim = 6 + 6 + 3 + len(self.arm_joint_names)
         self.observation_space = gym.spaces.Dict(
             {
                 "camera": gym.spaces.Box(low=0.0, high=1.0, shape=(self.image_height, self.image_width, c)),
-                "proprio": gym.spaces.Box(low=-math.inf, high=math.inf, shape=(proprio_dim,)),
+                "proprio": proprio_space,
             }
         )
         # keep camera cfg resolution in sync, and wire up the mask source
@@ -263,26 +296,44 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         self._actions = torch.zeros(n, len(self._arm_joint_ids), device=self.device)
         self._prev_actions = torch.zeros_like(self._actions)
         self._target_pos_b = torch.zeros(n, 3, device=self.device)  # base frame
+        # mid-episode target resampling: age (in control steps) since the target
+        # was last sampled, and the threshold at which we resample.
+        self._target_age = torch.zeros(n, dtype=torch.long, device=self.device)
+        if self.cfg.target_resample_time_s and self.cfg.target_resample_time_s > 0:
+            self._target_resample_steps = max(1, round(self.cfg.target_resample_time_s / self.step_dt))
+        else:
+            self._target_resample_steps = 10**9  # effectively never
         self._hand_pos_b = torch.zeros(n, 3, device=self.device)  # env-local frame
         self._hand_vel = torch.zeros(n, 3, device=self.device)
 
         self._box_min = torch.tensor(self.cfg.hand_box_min, device=self.device)
         self._box_max = torch.tensor(self.cfg.hand_box_max, device=self.device)
         self._hand_quat = torch.tensor(self.cfg.hand_orient, device=self.device).view(1, 4)
+        # per-env flag: is the hand obstacle present this episode?
+        self._hand_active = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self._hand_parked = torch.tensor(self.cfg.hand_parked_pos, device=self.device)
 
-        # which cameras are active
-        self._use_overhead = self.cfg.camera_view in ("overhead", "both")
-        self._use_wrist = self.cfg.camera_view in ("wrist", "both")
+        # reachability clamp (keeps sampled targets inside the arm's workspace)
+        self._reach_center = torch.tensor(self.cfg.reach_center, device=self.device).view(1, 3)
+        # gripper-tip offset (in gripper_link frame), broadcast over envs
+        self._ee_offset = torch.tensor(self.cfg.ee_offset, device=self.device).view(1, 3).expand(n, 3)
+
+        # vision pathway / which cameras are active
+        self._use_vision = self.cfg.use_vision
+        self._use_overhead = self._use_vision and self.cfg.camera_view in ("overhead", "both")
+        self._use_wrist = self._use_vision and self.cfg.camera_view in ("wrist", "both")
 
     # ----- scene -----------------------------------------------------------
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.hand = RigidObject(self.cfg.hand_cfg)
 
+        # NOTE: _setup_scene runs inside super().__init__(), before __init__ sets
+        # self._use_vision, so read the flag off the cfg here.
         self._cameras = {}
-        if self.cfg.camera_view in ("overhead", "both"):
+        if self.cfg.use_vision and self.cfg.camera_view in ("overhead", "both"):
             self._cameras["overhead"] = TiledCamera(self.cfg.overhead_camera_cfg)
-        if self.cfg.camera_view in ("wrist", "both"):
+        if self.cfg.use_vision and self.cfg.camera_view in ("wrist", "both"):
             self._cameras["wrist"] = TiledCamera(self.cfg.wrist_camera_cfg)
 
         # ground + dome light
@@ -299,22 +350,46 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2500.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # goal marker (shows the target the EE should reach, like the SO-101 demo)
-        self._goal_markers = (
-            VisualizationMarkers(self.cfg.goal_marker_cfg) if self.cfg.show_goal_marker else None
-        )
+        # Goal marker: a debug-draw overlay (NOT a stage prim), so it shows up in
+        # the GUI viewport but is invisible to the policy's cameras. We only
+        # acquire it when a GUI is present, which also skips the per-step CPU sync
+        # during headless training.
+        self._draw = None
+        has_gui = False
+        try:
+            has_gui = self.sim.has_gui()
+        except Exception:
+            has_gui = False
+        if self.cfg.show_goal_marker and has_gui:
+            try:
+                from isaacsim.util.debug_draw import _debug_draw
+
+                self._draw = _debug_draw.acquire_debug_draw_interface()
+            except Exception:
+                self._draw = None
 
     # ----- actions ---------------------------------------------------------
     def _pre_physics_step(self, actions: torch.Tensor):
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
 
-        # advance the hand along its sweep, reflecting off the workspace box
-        self._hand_pos_b += self._hand_vel * self.step_dt
-        below = self._hand_pos_b < self._box_min
-        above = self._hand_pos_b > self._box_max
+        # mid-episode target resampling: bump age, resample envs whose target is
+        # older than the threshold (so the arm gets several reaches per episode).
+        self._target_age += 1
+        due = (self._target_age >= self._target_resample_steps).nonzero(as_tuple=False).squeeze(-1)
+        if due.numel() > 0:
+            self._sample_targets(due)
+
+        # advance the hand along its sweep, reflecting off the workspace box.
+        # Inactive (parked) hands keep velocity 0 and stay put -- but we must skip
+        # the box clamp for them, otherwise it would pull them back into view.
+        new_pos = self._hand_pos_b + self._hand_vel * self.step_dt
+        below = new_pos < self._box_min
+        above = new_pos > self._box_max
         self._hand_vel = torch.where(below | above, -self._hand_vel, self._hand_vel)
-        self._hand_pos_b = self._hand_pos_b.clamp(self._box_min, self._box_max)
+        new_pos = new_pos.clamp(self._box_min, self._box_max)
+        active = self._hand_active.unsqueeze(-1)
+        self._hand_pos_b = torch.where(active, new_pos, self._hand_pos_b)
         self._write_hand_pose()
 
     def _apply_action(self):
@@ -323,16 +398,37 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
 
     # ----- observations ----------------------------------------------------
     def _get_observations(self) -> dict:
-        image = self._build_image()
-
         joint_pos_rel = self.robot.data.joint_pos - self._default_joint_pos
         joint_vel = self.robot.data.joint_vel
+
+        # sim2real observation noise on the joint terms (only during training)
+        if self.cfg.domain_randomization:
+            if self.cfg.noise_joint_pos > 0:
+                joint_pos_rel = joint_pos_rel + sample_uniform(
+                    -self.cfg.noise_joint_pos, self.cfg.noise_joint_pos, joint_pos_rel.shape, self.device
+                )
+            if self.cfg.noise_joint_vel > 0:
+                joint_vel = joint_vel + sample_uniform(
+                    -self.cfg.noise_joint_vel, self.cfg.noise_joint_vel, joint_vel.shape, self.device
+                )
+
         proprio = torch.cat([joint_pos_rel, joint_vel, self._target_pos_b, self._actions], dim=-1)
 
-        if self._goal_markers is not None:
-            self._goal_markers.visualize(translations=self._target_pos_b + self.scene.env_origins)
+        self._draw_goal()
 
-        return {"policy": {"camera": image, "proprio": proprio}}
+        obs = {"proprio": proprio}
+        if self._use_vision:
+            obs["camera"] = self._build_image()
+        return {"policy": obs}
+
+    def _draw_goal(self):
+        """Overlay a green dot at each env's target (GUI only; never in camera)."""
+        if self._draw is None:
+            return
+        pts = (self._target_pos_b + self.scene.env_origins).detach().cpu().numpy().tolist()
+        n = len(pts)
+        self._draw.clear_points()
+        self._draw.draw_points(pts, [(0.0, 1.0, 0.2, 1.0)] * n, [14.0] * n)
 
     def _build_image(self) -> torch.Tensor:
         """Assemble the (N, H, W, C) image: per camera, RGB and/or hand mask."""
@@ -443,7 +539,10 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
 
     # ----- rewards / dones -------------------------------------------------
     def _ee_pos_w(self) -> torch.Tensor:
-        return self.robot.data.body_pos_w[:, self._ee_body_id, :]
+        """World position of the gripper tip (gripper_link origin + TCP offset)."""
+        pos = self.robot.data.body_pos_w[:, self._ee_body_id, :]
+        quat = self.robot.data.body_quat_w[:, self._ee_body_id, :]
+        return pos + quat_apply(quat, self._ee_offset)
 
     def _min_hand_clearance(self) -> torch.Tensor:
         """Minimum distance from the hand to any robot link (world frame)."""
@@ -466,7 +565,21 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         collided = clearance < self.cfg.collision_distance
         r_collision = -self.cfg.collision_penalty * collided.float()
 
-        return r_track + r_track_fine + r_clear + r_action + r_collision
+        total = r_track + r_track_fine + r_clear + r_action + r_collision
+
+        # Log scalar reward terms + the raw tip->target distance so they show up
+        # in TensorBoard (skrl logs infos["log"] because the trainer cfg sets
+        # environment_info: log). Also printed by the eval/play scripts.
+        self.extras["log"] = {
+            "dist_tip_to_target": dist.mean(),
+            "reward/track": r_track.mean(),
+            "reward/track_fine": r_track_fine.mean(),
+            "reward/clearance": r_clear.mean(),
+            "reward/action_rate": r_action.mean(),
+            "reward/collision": r_collision.mean(),
+            "reward/total": total.mean(),
+        }
+        return total
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -488,20 +601,42 @@ class SoArm101ReachAvoidEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._prev_actions[env_ids] = 0.0
 
-        # resample target (base frame)
-        self._target_pos_b[env_ids, 0] = sample_uniform(*self.cfg.target_x_range, (n,), self.device)
-        self._target_pos_b[env_ids, 1] = sample_uniform(*self.cfg.target_y_range, (n,), self.device)
-        self._target_pos_b[env_ids, 2] = sample_uniform(*self.cfg.target_z_range, (n,), self.device)
+        # resample the target (also resets each env's target age)
+        self._sample_targets(env_ids)
 
-        # resample hand: spawn on the workspace box surface, sweep across it
-        self._hand_pos_b[env_ids] = self._sample_box_surface(n)
-        # heading roughly toward the opposite side (so it sweeps through), with jitter
-        direction = -torch.nn.functional.normalize(self._hand_pos_b[env_ids], dim=-1)
+        # decide, per env, whether the hand is present this episode
+        active = torch.rand(n, device=self.device) < self.cfg.hand_spawn_prob
+        self._hand_active[env_ids] = active
+
+        # active hands spawn on the workspace box surface and sweep across it;
+        # inactive hands are parked far away (invisible, no clearance effect).
+        surf = self._sample_box_surface(n)
+        direction = -torch.nn.functional.normalize(surf, dim=-1)
         direction += sample_uniform(-0.4, 0.4, (n, 3), self.device)
         direction = torch.nn.functional.normalize(direction, dim=-1)
         speed = sample_uniform(*self.cfg.hand_speed_range, (n, 1), self.device)
-        self._hand_vel[env_ids] = direction * speed
+
+        active_col = active.unsqueeze(-1)
+        self._hand_pos_b[env_ids] = torch.where(active_col, surf, self._hand_parked)
+        self._hand_vel[env_ids] = torch.where(active_col, direction * speed, torch.zeros_like(surf))
         self._write_hand_pose(env_ids)
+
+    def _sample_targets(self, env_ids):
+        """Sample target positions (root frame) for the given envs and reset their
+        age. Optionally clamps onto the reachable sphere; by default targets may
+        be out of reach and the policy just minimises tip->target distance."""
+        n = len(env_ids)
+        tgt = torch.empty(n, 3, device=self.device)
+        tgt[:, 0] = sample_uniform(*self.cfg.target_x_range, (n,), self.device)
+        tgt[:, 1] = sample_uniform(*self.cfg.target_y_range, (n,), self.device)
+        tgt[:, 2] = sample_uniform(*self.cfg.target_z_range, (n,), self.device)
+        if self.cfg.clamp_targets_to_reach:
+            offset = tgt - self._reach_center
+            radius = torch.linalg.norm(offset, dim=-1, keepdim=True).clamp(min=1e-6)
+            scale = (self.cfg.reach_radius / radius).clamp(max=1.0)
+            tgt = self._reach_center + offset * scale
+        self._target_pos_b[env_ids] = tgt
+        self._target_age[env_ids] = 0
 
     def _sample_box_surface(self, n: int) -> torch.Tensor:
         lo, hi = self._box_min, self._box_max

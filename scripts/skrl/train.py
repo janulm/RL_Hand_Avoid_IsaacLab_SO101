@@ -39,6 +39,17 @@ parser.add_argument(
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
+    "--exp_config",
+    type=str,
+    default=None,
+    help=(
+        "Path to an experiment YAML (see configs/experiments/). Defines the run "
+        "name, env overrides (hand_spawn_prob, target ranges, use_vision, ...), "
+        "and which agent cfg to use. Checkpoints land in a folder named "
+        "'<name>_<timestamp>'."
+    ),
+)
+parser.add_argument(
     "--agent",
     type=str,
     default=None,
@@ -100,6 +111,27 @@ args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 
+# Load the experiment config (if any) BEFORE launching the app, so it can drive
+# the task selection, agent cfg, camera enablement and run name. The env field
+# overrides are applied later, once the env cfg object exists.
+EXP_CFG = None
+if args_cli.exp_config is not None:
+    import yaml as _yaml
+
+    with open(args_cli.exp_config) as _f:
+        EXP_CFG = _yaml.safe_load(_f) or {}
+    if args_cli.task is None and EXP_CFG.get("task"):
+        args_cli.task = EXP_CFG["task"]
+    if args_cli.num_envs is None and EXP_CFG.get("num_envs") is not None:
+        args_cli.num_envs = EXP_CFG["num_envs"]
+    if args_cli.max_iterations is None and EXP_CFG.get("max_iterations") is not None:
+        args_cli.max_iterations = EXP_CFG["max_iterations"]
+    if args_cli.seed is None and EXP_CFG.get("seed") is not None:
+        args_cli.seed = EXP_CFG["seed"]
+    # vision configs need the renderer; proprio-only ones don't.
+    if (EXP_CFG.get("env") or {}).get("use_vision", True):
+        args_cli.enable_cameras = True
+
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 
@@ -151,6 +183,23 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # import logger
 logger = logging.getLogger(__name__)
 
+
+def _apply_env_overrides(env_cfg, overrides: dict):
+    """Apply dotted-key overrides from an experiment YAML onto the env cfg.
+
+    Supports nested attributes (e.g. ``scene.num_envs``). Lists are left as-is
+    (the env reads ranges via unpacking / torch.tensor, both accept lists).
+    """
+    for key, value in (overrides or {}).items():
+        obj = env_cfg
+        parts = key.split(".")
+        for p in parts[:-1]:
+            obj = getattr(obj, p)
+        if not hasattr(obj, parts[-1]):
+            logger.warning(f"[exp_config] env has no attribute '{key}'; skipping.")
+            continue
+        setattr(obj, parts[-1], value)
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 # config shortcuts
@@ -178,6 +227,18 @@ def main(
     env_cfg.sim.device = (
         args_cli.device if args_cli.device is not None else env_cfg.sim.device
     )
+
+    # The experiment file is the single source of truth for the agent: if it
+    # carries a full `agent:` block, use it instead of the registry default.
+    if EXP_CFG is not None and isinstance(EXP_CFG.get("agent"), dict):
+        agent_cfg = EXP_CFG["agent"]
+
+    # apply experiment env overrides, then rebuild derived fields (observation
+    # space, camera cfgs) since those are computed in __post_init__.
+    if EXP_CFG is not None:
+        _apply_env_overrides(env_cfg, EXP_CFG.get("env", {}))
+        if hasattr(env_cfg, "__post_init__"):
+            env_cfg.__post_init__()
 
     # check for invalid combination of CPU device with distributed training
     if (
@@ -223,15 +284,18 @@ def main(
     )
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = (
-        datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        + f"_{algorithm}_{args_cli.ml_framework}"
-    )
+    # specify directory for logging runs.
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    exp_name = EXP_CFG.get("name") if EXP_CFG else None
+    if exp_name:
+        # experiment-config runs: '<config name>_<timestamp>'
+        log_dir = f"{exp_name}_{timestamp}"
+    else:
+        log_dir = f"{timestamp}_{algorithm}_{args_cli.ml_framework}"
+        if agent_cfg["agent"]["experiment"]["experiment_name"]:
+            log_dir += f'_{agent_cfg["agent"]["experiment"]["experiment_name"]}'
     # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not change it (see PR #2346, comment-2819298849)
     print(f"Exact experiment name requested from command line: {log_dir}")
-    if agent_cfg["agent"]["experiment"]["experiment_name"]:
-        log_dir += f'_{agent_cfg["agent"]["experiment"]["experiment_name"]}'
     # set directory into agent config
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir

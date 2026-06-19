@@ -1,0 +1,88 @@
+# =============================================================================
+# Experiment: reach_only_proprio
+# Reach-only, PROPRIO-ONLY (no vision). The quickest end-to-end sanity check of
+# the reach pipeline (rewards, actions, target sampling). The policy sees only
+# joint state + target position, so it converges fast. Everything that defines
+# this run lives in THIS file: run params, env overrides, and the full agent.
+# =============================================================================
+name: reach_only_proprio
+task: Isaac-SO-ARM101-ReachAvoid-Direct-v0
+num_envs: 2048          # cheap without cameras -> push the GPU (4096 ok on 24GB)
+max_iterations: 300
+seed: 42
+
+# --- environment overrides (onto SoArm101ReachAvoidEnvCfg; dotted keys ok) ---
+env:
+  use_vision: false       # no cameras created, proprio-only observation
+  hand_spawn_prob: 0.0    # pure reach (no obstacle)
+  show_goal_marker: true  # green dot in the GUI only (never in the policy input)
+  target_resample_time_s: 4.0
+  clamp_targets_to_reach: false
+  target_x_range: [-0.30, 0.30]
+  target_y_range: [-0.30, 0.30]
+  target_z_range: [0.02, 0.40]
+  episode_length_s: 8.0
+
+# --- agent: full skrl PPO config (MLP-only; no CNN) --------------------------
+agent:
+  seed: 42
+  models:
+    separate: False
+    policy:
+      class: GaussianMixin
+      clip_actions: True
+      clip_log_std: True
+      min_log_std: -20.0
+      max_log_std: 2.0
+      initial_log_std: 0.0
+      network:
+        - name: net
+          input: OBSERVATIONS["proprio"]
+          layers: [256, 128, 64]
+          activations: elu
+      output: ACTIONS
+    value:
+      class: DeterministicMixin
+      clip_actions: False
+      network:
+        - name: net
+          input: OBSERVATIONS["proprio"]
+          layers: [256, 128, 64]
+          activations: elu
+      output: ONE
+  memory:
+    class: RandomMemory
+    memory_size: -1
+  agent:
+    class: PPO
+    rollouts: 24
+    learning_epochs: 5
+    mini_batches: 4
+    discount_factor: 0.99
+    lambda: 0.95
+    learning_rate: 1.0e-03   # reference reach uses 1e-3; KL scheduler adapts it
+    learning_rate_scheduler: KLAdaptiveLR
+    learning_rate_scheduler_kwargs:
+      kl_threshold: 0.01
+    state_preprocessor: null   # Dict obs can't go through the running scaler
+    value_preprocessor: RunningStandardScaler
+    value_preprocessor_kwargs: null
+    random_timesteps: 0
+    learning_starts: 0
+    grad_norm_clip: 1.0
+    ratio_clip: 0.2
+    value_clip: 0.2
+    clip_predicted_values: True
+    entropy_loss_scale: 0.01
+    value_loss_scale: 1.0
+    kl_threshold: 0.0
+    rewards_shaper_scale: 1.0
+    experiment:
+      directory: "so101_reachavoid"
+      experiment_name: ""
+      write_interval: auto
+      checkpoint_interval: auto
+  trainer:
+    class: SequentialTrainer
+    timesteps: 100000        # overridden by max_iterations * rollouts
+    environment_info: log

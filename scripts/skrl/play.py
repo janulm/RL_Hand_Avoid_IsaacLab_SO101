@@ -40,6 +40,16 @@ parser.add_argument(
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
+    "--exp_config",
+    type=str,
+    default=None,
+    help=(
+        "Path to the experiment YAML used for training (configs/experiments/). "
+        "Rebuilds the same env + agent network and auto-finds the latest "
+        "'<name>_<timestamp>' run for the checkpoint."
+    ),
+)
+parser.add_argument(
     "--checkpoint", type=str, default=None, help="Path to model checkpoint."
 )
 parser.add_argument(
@@ -74,6 +84,18 @@ args_cli = parser.parse_args()
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
+
+# Load the experiment config (if any) before launching the app, mirroring train.py.
+EXP_CFG = None
+if args_cli.exp_config is not None:
+    import yaml as _yaml
+
+    with open(args_cli.exp_config) as _f:
+        EXP_CFG = _yaml.safe_load(_f) or {}
+    if args_cli.task is None and EXP_CFG.get("task"):
+        args_cli.task = EXP_CFG["task"]
+    if (EXP_CFG.get("env") or {}).get("use_vision", True):
+        args_cli.enable_cameras = True
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -140,12 +162,30 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
     )
-    try:
-        experiment_cfg = load_cfg_from_registry(
-            args_cli.task, f"skrl_{algorithm}_cfg_entry_point"
-        )
-    except ValueError:
-        experiment_cfg = load_cfg_from_registry(args_cli.task, "skrl_cfg_entry_point")
+
+    # apply experiment env overrides so playback matches training, then rebuild
+    # the derived fields (observation space, camera cfgs) via __post_init__.
+    if EXP_CFG is not None:
+        for key, value in (EXP_CFG.get("env") or {}).items():
+            obj = env_cfg
+            parts = key.split(".")
+            for p in parts[:-1]:
+                obj = getattr(obj, p)
+            if hasattr(obj, parts[-1]):
+                setattr(obj, parts[-1], value)
+        if hasattr(env_cfg, "__post_init__"):
+            env_cfg.__post_init__()
+
+    # agent cfg: prefer the experiment file's embedded agent, else the registry.
+    if EXP_CFG is not None and isinstance(EXP_CFG.get("agent"), dict):
+        experiment_cfg = EXP_CFG["agent"]
+    else:
+        try:
+            experiment_cfg = load_cfg_from_registry(
+                args_cli.task, f"skrl_{algorithm}_cfg_entry_point"
+            )
+        except ValueError:
+            experiment_cfg = load_cfg_from_registry(args_cli.task, "skrl_cfg_entry_point")
 
     # specify directory for logging experiments (load checkpoint)
     log_root_path = os.path.join(
@@ -164,9 +204,13 @@ def main():
     elif args_cli.checkpoint:
         resume_path = os.path.abspath(args_cli.checkpoint)
     else:
+        # experiment runs are named "<name>_<timestamp>"; plain runs use the
+        # default "<timestamp>_<algo>_<framework>" pattern.
+        exp_name = EXP_CFG.get("name") if EXP_CFG else None
+        run_dir = f"{exp_name}_.*" if exp_name else f".*_{algorithm}_{args_cli.ml_framework}"
         resume_path = get_checkpoint_path(
             log_root_path,
-            run_dir=f".*_{algorithm}_{args_cli.ml_framework}",
+            run_dir=run_dir,
             other_dirs=["checkpoints"],
         )
     log_dir = os.path.dirname(os.path.dirname(resume_path))

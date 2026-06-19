@@ -13,6 +13,9 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": SoArm101ReachAvoidEnvCfg,
+        # Framework default agent (used for plain `--task` runs without an
+        # --exp_config). Experiment files in configs/experiments/ are
+        # self-contained and override this entirely.
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
