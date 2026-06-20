@@ -1,0 +1,71 @@
+{
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "default_rad": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.0,
+    "elbow_flex": -0.0,
+    "wrist_flex": 1.5700000524520874,
+    "wrist_roll": -0.0,
+    "gripper": 0.0
+  },
+  "joint_limits_rad": {
+    "shoulder_pan": [
+      -1.7278738021850586,
+      1.7278738021850586
+    ],
+    "shoulder_lift": [
+      -1.5707968473434448,
+      1.5707968473434448
+    ],
+    "elbow_flex": [
+      -1.5209999084472656,
+      1.5209999084472656
+    ],
+    "wrist_flex": [
+      -1.4922537803649902,
+      1.4922537803649902
+    ],
+    "wrist_roll": [
+      -2.464596748352051,
+      2.5619564056396484
+    ],
+    "gripper": [
+      -0.07853984832763672,
+      1.6493366956710815
+    ]
+  },
+  "arm_joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll"
+  ],
+  "arm_joint_ids": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "action_scale": 1.0,
+  "decimation": 2,
+  "sim_dt": 0.016666666666666666,
+  "control_dt": 0.03333333333333333,
+  "ee_offset": [
+    -0.0079,
+    -0.0002,
+    -0.0981
+  ],
+  "ee_body": "gripper_link",
+  "n_joints": 6,
+  "n_actions": 5,
+  "proprio_dim": 20
+}
